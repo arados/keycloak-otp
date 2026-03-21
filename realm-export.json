@@ -1,0 +1,414 @@
+{
+  "realm": "otp-demo",
+  "enabled": true,
+  "registrationAllowed": false,
+  "loginWithEmailAllowed": true,
+  "loginTheme": "otp",
+  "emailTheme": "otp",
+  "smtpServer": {
+    "host": "mailpit",
+    "port": "1025",
+    "from": "keycloak@example.com",
+    "fromDisplayName": "Keycloak OTP Demo",
+    "replyTo": "",
+    "replyToDisplayName": "",
+    "envelopeFrom": "",
+    "ssl": "false",
+    "starttls": "false",
+    "auth": "false"
+  },
+  "authenticationFlows": [
+    {
+      "alias": "browser-with-email-otp",
+      "description": "Browser flow with Email OTP as second factor (password + OTP)",
+      "providerId": "basic-flow",
+      "topLevel": true,
+      "builtIn": false,
+      "authenticationExecutions": [
+        {
+          "authenticator": "auth-cookie",
+          "authenticatorFlow": false,
+          "requirement": "ALTERNATIVE",
+          "priority": 10
+        },
+        {
+          "authenticatorFlow": true,
+          "requirement": "ALTERNATIVE",
+          "priority": 20,
+          "flowAlias": "browser-email-otp-forms"
+        }
+      ]
+    },
+    {
+      "alias": "browser-email-otp-forms",
+      "description": "Username/password then email OTP",
+      "providerId": "basic-flow",
+      "topLevel": false,
+      "builtIn": false,
+      "authenticationExecutions": [
+        {
+          "authenticator": "auth-username-password-form",
+          "authenticatorFlow": false,
+          "requirement": "REQUIRED",
+          "priority": 10
+        },
+        {
+          "authenticator": "email-otp-form",
+          "authenticatorFlow": false,
+          "requirement": "REQUIRED",
+          "priority": 20,
+          "authenticatorConfig": "email-otp-config"
+        }
+      ]
+    },
+    {
+      "alias": "browser-with-sms-otp",
+      "description": "Browser flow with SMS OTP as second factor (password + OTP)",
+      "providerId": "basic-flow",
+      "topLevel": true,
+      "builtIn": false,
+      "authenticationExecutions": [
+        {
+          "authenticator": "auth-cookie",
+          "authenticatorFlow": false,
+          "requirement": "ALTERNATIVE",
+          "priority": 10
+        },
+        {
+          "authenticatorFlow": true,
+          "requirement": "ALTERNATIVE",
+          "priority": 20,
+          "flowAlias": "browser-sms-otp-forms"
+        }
+      ]
+    },
+    {
+      "alias": "browser-sms-otp-forms",
+      "description": "Username/password then SMS OTP",
+      "providerId": "basic-flow",
+      "topLevel": false,
+      "builtIn": false,
+      "authenticationExecutions": [
+        {
+          "authenticator": "auth-username-password-form",
+          "authenticatorFlow": false,
+          "requirement": "REQUIRED",
+          "priority": 10
+        },
+        {
+          "authenticator": "sms-otp-form",
+          "authenticatorFlow": false,
+          "requirement": "REQUIRED",
+          "priority": 20,
+          "authenticatorConfig": "sms-otp-config"
+        }
+      ]
+    },
+    {
+      "alias": "passwordless-browser-email-otp",
+      "description": "Passwordless browser flow: username then Email OTP",
+      "providerId": "basic-flow",
+      "topLevel": true,
+      "builtIn": false,
+      "authenticationExecutions": [
+        {
+          "authenticator": "auth-cookie",
+          "authenticatorFlow": false,
+          "requirement": "ALTERNATIVE",
+          "priority": 10
+        },
+        {
+          "authenticatorFlow": true,
+          "requirement": "ALTERNATIVE",
+          "priority": 20,
+          "flowAlias": "passwordless-browser-email-otp-forms"
+        }
+      ]
+    },
+    {
+      "alias": "passwordless-browser-email-otp-forms",
+      "description": "Username only then email OTP (no password)",
+      "providerId": "basic-flow",
+      "topLevel": false,
+      "builtIn": false,
+      "authenticationExecutions": [
+        {
+          "authenticator": "auth-username-form",
+          "authenticatorFlow": false,
+          "requirement": "REQUIRED",
+          "priority": 10
+        },
+        {
+          "authenticator": "email-otp-form",
+          "authenticatorFlow": false,
+          "requirement": "REQUIRED",
+          "priority": 20,
+          "authenticatorConfig": "email-otp-config"
+        }
+      ]
+    },
+    {
+      "alias": "passwordless-browser-sms-otp",
+      "description": "Passwordless browser flow: username then SMS OTP",
+      "providerId": "basic-flow",
+      "topLevel": true,
+      "builtIn": false,
+      "authenticationExecutions": [
+        {
+          "authenticator": "auth-cookie",
+          "authenticatorFlow": false,
+          "requirement": "ALTERNATIVE",
+          "priority": 10
+        },
+        {
+          "authenticatorFlow": true,
+          "requirement": "ALTERNATIVE",
+          "priority": 20,
+          "flowAlias": "passwordless-browser-sms-otp-forms"
+        }
+      ]
+    },
+    {
+      "alias": "passwordless-browser-sms-otp-forms",
+      "description": "Username only then SMS OTP (no password)",
+      "providerId": "basic-flow",
+      "topLevel": false,
+      "builtIn": false,
+      "authenticationExecutions": [
+        {
+          "authenticator": "auth-username-form",
+          "authenticatorFlow": false,
+          "requirement": "REQUIRED",
+          "priority": 10
+        },
+        {
+          "authenticator": "sms-otp-form",
+          "authenticatorFlow": false,
+          "requirement": "REQUIRED",
+          "priority": 20,
+          "authenticatorConfig": "sms-otp-config"
+        }
+      ]
+    },
+    {
+      "alias": "direct-grant-with-email-otp",
+      "description": "Direct grant flow with Email OTP (password + OTP)",
+      "providerId": "basic-flow",
+      "topLevel": true,
+      "builtIn": false,
+      "authenticationExecutions": [
+        {
+          "authenticator": "direct-grant-validate-username",
+          "authenticatorFlow": false,
+          "requirement": "REQUIRED",
+          "priority": 10
+        },
+        {
+          "authenticator": "direct-grant-validate-password",
+          "authenticatorFlow": false,
+          "requirement": "REQUIRED",
+          "priority": 20
+        },
+        {
+          "authenticator": "direct-grant-email-otp",
+          "authenticatorFlow": false,
+          "requirement": "REQUIRED",
+          "priority": 30,
+          "authenticatorConfig": "email-otp-config"
+        }
+      ]
+    },
+    {
+      "alias": "direct-grant-with-sms-otp",
+      "description": "Direct grant flow with SMS OTP (password + OTP)",
+      "providerId": "basic-flow",
+      "topLevel": true,
+      "builtIn": false,
+      "authenticationExecutions": [
+        {
+          "authenticator": "direct-grant-validate-username",
+          "authenticatorFlow": false,
+          "requirement": "REQUIRED",
+          "priority": 10
+        },
+        {
+          "authenticator": "direct-grant-validate-password",
+          "authenticatorFlow": false,
+          "requirement": "REQUIRED",
+          "priority": 20
+        },
+        {
+          "authenticator": "direct-grant-sms-otp",
+          "authenticatorFlow": false,
+          "requirement": "REQUIRED",
+          "priority": 30,
+          "authenticatorConfig": "sms-otp-config"
+        }
+      ]
+    },
+    {
+      "alias": "passwordless-direct-grant-email-otp",
+      "description": "Passwordless direct grant: username then Email OTP (no password)",
+      "providerId": "basic-flow",
+      "topLevel": true,
+      "builtIn": false,
+      "authenticationExecutions": [
+        {
+          "authenticator": "direct-grant-validate-username",
+          "authenticatorFlow": false,
+          "requirement": "REQUIRED",
+          "priority": 10
+        },
+        {
+          "authenticator": "direct-grant-email-otp",
+          "authenticatorFlow": false,
+          "requirement": "REQUIRED",
+          "priority": 20,
+          "authenticatorConfig": "email-otp-config"
+        }
+      ]
+    },
+    {
+      "alias": "passwordless-direct-grant-sms-otp",
+      "description": "Passwordless direct grant: username then SMS OTP (no password)",
+      "providerId": "basic-flow",
+      "topLevel": true,
+      "builtIn": false,
+      "authenticationExecutions": [
+        {
+          "authenticator": "direct-grant-validate-username",
+          "authenticatorFlow": false,
+          "requirement": "REQUIRED",
+          "priority": 10
+        },
+        {
+          "authenticator": "direct-grant-sms-otp",
+          "authenticatorFlow": false,
+          "requirement": "REQUIRED",
+          "priority": 20,
+          "authenticatorConfig": "sms-otp-config"
+        }
+      ]
+    }
+    ,
+    {
+      "alias": "browser-otp-choice",
+      "description": "Browser flow: username then choose between Email OTP or SMS OTP",
+      "providerId": "basic-flow",
+      "topLevel": true,
+      "builtIn": false,
+      "authenticationExecutions": [
+        {
+          "authenticator": "auth-cookie",
+          "authenticatorFlow": false,
+          "requirement": "ALTERNATIVE",
+          "priority": 10
+        },
+        {
+          "authenticatorFlow": true,
+          "requirement": "ALTERNATIVE",
+          "priority": 20,
+          "flowAlias": "browser-otp-choice-forms"
+        }
+      ]
+    },
+    {
+      "alias": "browser-otp-choice-forms",
+      "description": "Username then OTP channel selection",
+      "providerId": "basic-flow",
+      "topLevel": false,
+      "builtIn": false,
+      "authenticationExecutions": [
+        {
+          "authenticator": "auth-username-form",
+          "authenticatorFlow": false,
+          "requirement": "REQUIRED",
+          "priority": 10
+        },
+        {
+          "authenticator": "otp-channel-choice-form",
+          "authenticatorFlow": false,
+          "requirement": "REQUIRED",
+          "priority": 20,
+          "authenticatorConfig": "otp-choice-config"
+        }
+      ]
+    }
+  ],
+  "authenticatorConfig": [
+    {
+      "alias": "email-otp-config",
+      "config": {
+        "emailOtp.codeLength": "6",
+        "emailOtp.ttl": "300",
+        "emailOtp.maxRetries": "3"
+      }
+    },
+    {
+      "alias": "otp-choice-config",
+      "config": {
+        "otpChoice.codeLength": "6",
+        "otpChoice.ttl": "300",
+        "otpChoice.maxRetries": "3",
+        "otpChoice.phoneAttribute": "phoneNumber"
+      }
+    },
+    {
+      "alias": "sms-otp-config",
+      "config": {
+        "smsOtp.codeLength": "6",
+        "smsOtp.ttl": "300",
+        "smsOtp.maxRetries": "3",
+        "smsOtp.phoneAttribute": "phoneNumber"
+      }
+    }
+  ],
+  "browserFlow": "passwordless-browser-sms-otp",
+  "directGrantFlow": "passwordless-direct-grant-sms-otp",
+  "clients": [
+    {
+      "clientId": "otp-demo-client",
+      "name": "OTP Demo Client (password + OTP)",
+      "description": "Uses password+OTP flows. Configure flow overrides in admin console if realm default is passwordless.",
+      "enabled": true,
+      "publicClient": true,
+      "directAccessGrantsEnabled": true,
+      "redirectUris": ["http://localhost:8080/*"],
+      "webOrigins": ["http://localhost:8080"],
+      "standardFlowEnabled": true
+    },
+    {
+      "clientId": "passwordless-demo-client",
+      "name": "Passwordless Demo Client (OTP only, no password)",
+      "enabled": true,
+      "publicClient": true,
+      "directAccessGrantsEnabled": true,
+      "redirectUris": ["http://localhost:8080/*"],
+      "webOrigins": ["http://localhost:8080"],
+      "standardFlowEnabled": true
+    }
+  ],
+  "users": [
+    {
+      "username": "testuser",
+      "enabled": true,
+      "email": "testuser@example.com",
+      "emailVerified": true,
+      "firstName": "Test",
+      "lastName": "User",
+      "attributes": {
+        "phoneNumber": ["+1234567890"]
+      },
+      "credentials": [
+        {
+          "type": "password",
+          "value": "password",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "default-roles-otp-demo"
+      ]
+    }
+  ]
+}

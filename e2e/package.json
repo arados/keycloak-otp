@@ -1,0 +1,19 @@
+{
+  "name": "e2e",
+  "version": "1.0.0",
+  "description": "E2E tests for keycloak-otp plugin",
+  "private": true,
+  "scripts": {
+    "test": "npx playwright test",
+    "test:sms": "npx playwright test sms-otp-login",
+    "test:email": "npx playwright test email-otp-login",
+    "test:headed": "npx playwright test --headed"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "Apache-2.0",
+  "type": "commonjs",
+  "devDependencies": {
+    "@playwright/test": "^1.58.2"
+  }
+}

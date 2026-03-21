@@ -1,0 +1,8 @@
+{
+    "themes": [
+        {
+            "name": "otp",
+            "types": ["login", "email"]
+        }
+    ]
+}

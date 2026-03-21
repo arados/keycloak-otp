@@ -1,0 +1,17 @@
+.git
+.gitignore
+.dockerignore
+.idea
+*.iml
+.vscode
+
+e2e/
+target/
+*/target/
+
+*.md
+!README.md
+LICENSE
+CLAUDE.md
+
+.DS_Store

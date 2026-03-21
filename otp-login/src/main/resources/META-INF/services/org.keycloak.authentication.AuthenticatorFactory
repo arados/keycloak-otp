@@ -1,0 +1,2 @@
+hr.delmisoft.keycloak.otp.EmailOtpDirectGrantAuthenticator
+hr.delmisoft.keycloak.otp.sms.SmsOtpDirectGrantAuthenticator

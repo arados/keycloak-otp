@@ -1,0 +1,3 @@
+hr.delmisoft.keycloak.otp.EmailOtpAuthenticatorFactory
+hr.delmisoft.keycloak.otp.sms.SmsOtpAuthenticatorFactory
+hr.delmisoft.keycloak.otp.OtpChannelChoiceAuthenticatorFactory
