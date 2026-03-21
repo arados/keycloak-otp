@@ -1,0 +1,2 @@
+hr.delmisoft.keycloak.otp.grant.EmailOtpGrantTypeFactory
+hr.delmisoft.keycloak.otp.grant.SmsOtpGrantTypeFactory

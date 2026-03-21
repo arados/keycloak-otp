@@ -79,10 +79,12 @@ A pre-configured `otp-demo` realm is imported with:
 | Provider ID | Display Name | Flow Type | Channel |
 |---|---|---|---|
 | `email-otp-form` | Email OTP Form | Browser | Email |
-| `direct-grant-email-otp` | Email OTP | Direct Grant | Email |
+| `direct-grant-email-otp` | Email OTP | Direct Grant (legacy) | Email |
 | `sms-otp-form` | SMS OTP Form | Browser | SMS |
 | `otp-channel-choice-form` | OTP Channel Choice | Browser | Email or SMS |
-| `direct-grant-sms-otp` | SMS OTP | Direct Grant | SMS |
+| `direct-grant-sms-otp` | SMS OTP | Direct Grant (legacy) | SMS |
+| `urn:otp:email` | Email OTP Grant | Custom Grant Type | Email |
+| `urn:otp:sms` | SMS OTP Grant | Custom Grant Type | SMS |
 
 ## Theme
 
@@ -126,23 +128,31 @@ All authenticators are configurable through the Keycloak admin console under the
 
 After login with username/password, the user will be prompted to enter the OTP code sent to their email or phone.
 
-## Setup: Direct Grant Flow
+## Custom Grant Types (Recommended)
 
-1. In the Keycloak admin console, go to **Authentication** > **Flows**.
-2. Copy the **Direct Grant** flow (or create a new one).
-3. Add an execution and select **Email OTP** or **SMS OTP**.
-4. Set the requirement to **Required**.
-5. Bind the flow to the direct grant flow in **Authentication** > **Bindings**.
+The plugin provides custom OAuth2 grant types that replace `grant_type=password` with dedicated, descriptive grant types. The `password` parameter is **optional** — include it for MFA (password + OTP), omit it for passwordless (OTP only).
 
-### Direct Grant API Usage
+| Grant Type | Channel | Description |
+|---|---|---|
+| `urn:otp:email` | Email | Email OTP authentication |
+| `urn:otp:sms` | SMS | SMS OTP authentication |
 
-The direct grant flow uses a two-phase exchange:
+No flow configuration is needed — the grant types are self-contained.
+
+### API Usage
 
 **Phase 1 — Request the OTP:**
 
 ```bash
+# Passwordless (OTP only)
 curl -X POST "${KEYCLOAK_URL}/realms/${REALM}/protocol/openid-connect/token" \
-  -d "grant_type=password" \
+  -d "grant_type=urn:otp:sms" \
+  -d "client_id=${CLIENT_ID}" \
+  -d "username=${USERNAME}"
+
+# MFA (password + OTP) — same grant type, just add password
+curl -X POST "${KEYCLOAK_URL}/realms/${REALM}/protocol/openid-connect/token" \
+  -d "grant_type=urn:otp:email" \
   -d "client_id=${CLIENT_ID}" \
   -d "username=${USERNAME}" \
   -d "password=${PASSWORD}"
@@ -152,31 +162,42 @@ Response (HTTP 401):
 
 ```json
 {
-  "error": "email_otp_required",
-  "error_description": "An OTP code has been sent to your email address.",
+  "error": "sms_otp_required",
+  "error_description": "An OTP code has been sent to your phone number.",
   "otp_session_id": "a1b2c3d4-..."
 }
 ```
-
-For SMS, the `error` field will be `sms_otp_required`.
 
 **Phase 2 — Submit the OTP:**
 
 ```bash
 curl -X POST "${KEYCLOAK_URL}/realms/${REALM}/protocol/openid-connect/token" \
-  -d "grant_type=password" \
+  -d "grant_type=urn:otp:sms" \
   -d "client_id=${CLIENT_ID}" \
   -d "username=${USERNAME}" \
-  -d "password=${PASSWORD}" \
   -d "otp=${OTP_CODE}" \
   -d "otp_session_id=${OTP_SESSION_ID}"
 ```
 
 On success, returns the standard token response with `access_token`, `refresh_token`, etc.
 
+## Setup: Direct Grant Flow (Legacy)
+
+> **Note**: The custom grant types above are the recommended approach. The legacy direct grant authenticators below use `grant_type=password` and require flow configuration.
+
+1. In the Keycloak admin console, go to **Authentication** > **Flows**.
+2. Copy the **Direct Grant** flow (or create a new one).
+3. Add an execution and select **Email OTP** or **SMS OTP**.
+4. Set the requirement to **Required**.
+5. Bind the flow to the direct grant flow in **Authentication** > **Bindings**.
+
+### Legacy Direct Grant API Usage
+
+The legacy direct grant flow uses `grant_type=password` with a two-phase exchange. See the [custom grant types](#custom-grant-types-recommended) section above for the recommended approach.
+
 ## Passwordless Authentication
 
-The same authenticators support passwordless login — the user provides only a username, then verifies via OTP. No new code is needed; this is achieved through flow configuration.
+The same authenticators support passwordless login — the user provides only a username, then verifies via OTP.
 
 ### Passwordless Browser Flow
 
@@ -195,16 +216,11 @@ To configure manually:
 3. Add a sub-flow (ALTERNATIVE) with `Username Form` (REQUIRED) then `SMS OTP Form` or `Email OTP Form` (REQUIRED).
 4. Bind the flow to the realm or client.
 
-### Passwordless Direct Grant Flow
+### Passwordless Direct Grant
 
-Omits the password validation step entirely:
+With custom grant types, simply omit the `password` parameter — no separate flow needed. See [Custom Grant Types](#custom-grant-types-recommended).
 
-```
-direct-grant-validate-username  (REQUIRED)   ← identifies user by username
-direct-grant-sms-otp            (REQUIRED)   ← OTP is the only credential
-```
-
-### Passwordless Direct Grant API Usage
+### Passwordless Direct Grant API Usage (Legacy)
 
 **Phase 1 — Request the OTP (username only, no password):**
 
