@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Keycloak SPI plugin that adds OTP authentication via **email** and **SMS** channels. Multi-module Maven project producing four JARs deployed into Keycloak's `providers/` directory.
+Keycloak SPI plugin that adds OTP authentication via **email** and **SMS** channels. Multi-module Maven project producing a single deployable JAR.
 
 - **Keycloak version**: 26.5.5
 - **Java**: 17
@@ -15,7 +15,7 @@ Keycloak SPI plugin that adds OTP authentication via **email** and **SMS** chann
 ```
 common/     — Shared constants, SMS SPI interfaces and default log provider (keycloak-otp-common)
 otp-2fa/    — Browser flow authenticators for 2FA (keycloak-otp-2fa)
-otp-login/  — Direct grant authenticators for OTP login (keycloak-otp-login)
+otp-login/  — Custom OAuth2 grant types for OTP login (keycloak-otp-login)
 themes/     — Pure resource JAR with FreeMarker templates + messages (keycloak-otp-themes)
 dist/       — Single deployable JAR via maven-shade-plugin (keycloak-otp)
 ```
@@ -110,4 +110,5 @@ GitHub Actions workflow (`.github/workflows/ci.yml`):
 Security plugins configured in parent `pom.xml` (`pluginManagement`):
 - `spotbugs-maven-plugin` with `findsecbugs-plugin` — run via `mvn compile spotbugs:check`
 - `dependency-check-maven` — run via `mvn dependency-check:aggregate`
+- SpotBugs exclusion filter: `spotbugs-exclude.xml`
 - Suppressions file: `dependency-check-suppressions.xml`

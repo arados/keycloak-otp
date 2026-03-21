@@ -2,7 +2,7 @@
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
-A Keycloak SPI plugin that adds one-time password (OTP) authentication via **email** and **SMS**. Supports both browser login flows and direct grant (Resource Owner Password Credentials) flows.
+A Keycloak SPI plugin that adds one-time password (OTP) authentication via **email** and **SMS**. Supports browser login flows and custom OAuth2 grant types for API-based authentication.
 
 > [!NOTE]
 > This was developed using Claude Code. It is also still work in progress.
@@ -21,7 +21,7 @@ This is a multi-module Maven project:
 |---|---|---|
 | `common/` | `keycloak-otp-common` | Shared constants, SMS SPI interfaces and default log provider |
 | `otp-2fa/` | `keycloak-otp-2fa` | Browser flow authenticators for 2FA (email + SMS OTP forms) |
-| `otp-login/` | `keycloak-otp-login` | Direct grant authenticators for OTP login (ROPC flow) |
+| `otp-login/` | `keycloak-otp-login` | Custom OAuth2 grant types for OTP login via token endpoint |
 | `themes/` | `keycloak-otp-themes` | FreeMarker templates, messages, and theme resources |
 | `dist/` | `keycloak-otp` | Single deployable JAR (all modules merged) |
 
@@ -67,9 +67,9 @@ Services:
 - **Mailpit**: http://localhost:8025 — captures OTP emails
 
 A pre-configured `otp-demo` realm is imported with:
-- SMS OTP flows bound to browser and direct grant
+- Browser OTP flows (SMS, email, and channel choice)
 - The `otp` login/email theme enabled
-- Passwordless SMS OTP flows bound as realm defaults
+- Passwordless SMS OTP browser flow bound as realm default
 - Client `otp-demo-client`: password + OTP (MFA)
 - Client `passwordless-demo-client`: username + OTP only (no password)
 - Test user: `testuser` / `password` (email: testuser@example.com, phone: +1234567890)
@@ -88,7 +88,7 @@ A pre-configured `otp-demo` realm is imported with:
 
 The `themes/` module provides a Keycloak theme named `otp`. It includes:
 
-- **Login type**: OTP input forms (`login-email-otp.ftl`, `login-sms-otp.ftl`) and i18n messages — extends the `keycloak.v2` theme (PatternFly v5, uses `field.ftl`/`buttons.ftl` macros)
+- **Login type**: OTP input forms (`login-email-otp.ftl`, `login-sms-otp.ftl`, `login-otp-channel-select.ftl`) and i18n messages — extends the `keycloak.v2` theme (PatternFly v5, uses `field.ftl`/`buttons.ftl` macros)
 - **Email type**: OTP code email templates (HTML + text) and i18n messages — extends the `base` theme
 
 To use the theme, set `loginTheme` and/or `emailTheme` to `otp` in the realm settings.
@@ -350,7 +350,7 @@ Requires Docker services to be running (`docker compose up --build -d`). Tests c
 
 - OTP codes are compared using constant-time comparison (`MessageDigest.isEqual`) to prevent timing attacks
 - Codes are generated with `SecureRandom`
-- OTP sessions are stored in Keycloak's `SingleUseObjectProvider` (direct grant) or `AuthenticationSessionModel` auth notes (browser flow)
+- OTP sessions are stored in Keycloak's `SingleUseObjectProvider` (custom grant types) or `AuthenticationSessionModel` auth notes (browser flow)
 - Brute-force protection is built in via configurable max retries
 
 ## License
