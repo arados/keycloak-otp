@@ -86,7 +86,7 @@ public class EmailOtpAuthenticator implements Authenticator {
         }
 
         // Constant-time comparison
-        if (MessageDigest.isEqual(storedCode.getBytes(), enteredOtp.getBytes())) {
+        if (MessageDigest.isEqual(storedCode.getBytes(java.nio.charset.StandardCharsets.UTF_8), enteredOtp.getBytes(java.nio.charset.StandardCharsets.UTF_8))) {
             context.success();
         } else {
             authSession.setAuthNote(EmailOtpConst.AUTH_NOTE_ATTEMPTS, String.valueOf(attempts + 1));

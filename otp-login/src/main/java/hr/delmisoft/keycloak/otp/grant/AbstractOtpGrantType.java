@@ -197,7 +197,7 @@ public abstract class AbstractOtpGrantType extends OAuth2GrantTypeBase {
                     "OTP session is corrupt", Response.Status.UNAUTHORIZED);
         }
 
-        if (!MessageDigest.isEqual(storedCode.getBytes(), otp.getBytes())) {
+        if (!MessageDigest.isEqual(storedCode.getBytes(java.nio.charset.StandardCharsets.UTF_8), otp.getBytes(java.nio.charset.StandardCharsets.UTF_8))) {
             notes.put(NOTE_ATTEMPTS, String.valueOf(attempts + 1));
             store.replace(otpSessionId, notes);
             event.error(Errors.INVALID_USER_CREDENTIALS);

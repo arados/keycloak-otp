@@ -84,6 +84,7 @@
                                 <version>1.13.0</version>
                             </plugin>
                         </plugins>
+                        <excludeFilterFile>${maven.multiModuleProjectDirectory}/spotbugs-exclude.xml</excludeFilterFile>
                         <effort>Max</effort>
                         <threshold>Medium</threshold>
                         <failOnError>true</failOnError>

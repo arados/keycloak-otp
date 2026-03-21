@@ -152,7 +152,7 @@ public class OtpChannelChoiceAuthenticator implements Authenticator {
             return;
         }
 
-        if (MessageDigest.isEqual(storedCode.getBytes(), enteredOtp.getBytes())) {
+        if (MessageDigest.isEqual(storedCode.getBytes(java.nio.charset.StandardCharsets.UTF_8), enteredOtp.getBytes(java.nio.charset.StandardCharsets.UTF_8))) {
             context.success();
         } else {
             authSession.setAuthNote(AUTH_NOTE_ATTEMPTS, String.valueOf(attempts + 1));

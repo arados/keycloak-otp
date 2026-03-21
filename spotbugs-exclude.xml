@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<FindBugsFilter>
+    <!-- Authenticator factories use a stateless singleton, which is the standard Keycloak pattern.
+         Returning the shared INSTANCE from create() is intentional. -->
+    <Match>
+        <Bug pattern="EI_EXPOSE_REP"/>
+        <Method name="create"/>
+        <Or>
+            <Class name="hr.delmisoft.keycloak.otp.EmailOtpAuthenticatorFactory"/>
+            <Class name="hr.delmisoft.keycloak.otp.OtpChannelChoiceAuthenticatorFactory"/>
+            <Class name="hr.delmisoft.keycloak.otp.sms.SmsOtpAuthenticatorFactory"/>
+        </Or>
+    </Match>
+</FindBugsFilter>
