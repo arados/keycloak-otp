@@ -4,6 +4,9 @@
 
 A Keycloak SPI plugin that adds one-time password (OTP) authentication via **email** and **SMS**. Supports both browser login flows and direct grant (Resource Owner Password Credentials) flows.
 
+> [!NOTE]
+> This was developed using Claude Code. It is also still work in progress.
+
 ## Requirements
 
 - Java 17+
