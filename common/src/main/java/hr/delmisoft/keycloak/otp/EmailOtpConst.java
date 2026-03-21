@@ -6,7 +6,6 @@ public final class EmailOtpConst {
 
     // Provider IDs
     public static final String BROWSER_PROVIDER_ID = "email-otp-form";
-    public static final String DIRECT_GRANT_PROVIDER_ID = "direct-grant-email-otp";
     public static final String THEME_RESOURCE_PROVIDER_ID = "email-otp-resources";
 
     // Config keys

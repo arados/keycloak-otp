@@ -66,13 +66,11 @@ themes (no Java dependencies)
 - `OtpChannelChoiceAuthenticator` / `OtpChannelChoiceAuthenticatorFactory` — combined channel selection + OTP form (user picks email or SMS)
 - Stores OTP state in `AuthenticationSessionModel` auth notes
 
-**otp-login** — direct grant and custom grant type authenticators:
-- Custom OAuth2 grant types (recommended): `EmailOtpGrantType` / `SmsOtpGrantType` (`urn:otp:email`, `urn:otp:sms`)
+**otp-login** — custom OAuth2 grant types for OTP login:
+- `EmailOtpGrantType` / `SmsOtpGrantType` (`urn:otp:email`, `urn:otp:sms`)
   - Self-contained two-phase OTP flow at the token endpoint
   - Optional password validation (MFA when password present, passwordless when absent)
   - Registered via `META-INF/services/org.keycloak.protocol.oidc.grants.OAuth2GrantTypeFactory`
-- Legacy direct grant authenticators: `EmailOtpDirectGrantAuthenticator` / `SmsOtpDirectGrantAuthenticator`
-  - Work within `grant_type=password` (ROPC) authentication flows
 - Uses `SingleUseObjectProvider` for stateless token-based OTP sessions
 
 **themes** — pure resources, no Java code:

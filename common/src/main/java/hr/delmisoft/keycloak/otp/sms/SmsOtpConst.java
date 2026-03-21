@@ -6,7 +6,6 @@ public final class SmsOtpConst {
 
     // Provider IDs
     public static final String BROWSER_PROVIDER_ID = "sms-otp-form";
-    public static final String DIRECT_GRANT_PROVIDER_ID = "direct-grant-sms-otp";
 
     // Config keys
     public static final String CONFIG_CODE_LENGTH = "smsOtp.codeLength";
