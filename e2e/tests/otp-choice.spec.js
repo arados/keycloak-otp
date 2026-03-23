@@ -133,6 +133,67 @@ test.describe('OTP channel selection (Email vs SMS)', () => {
     await page.waitForURL(/\/realms\/otp-demo\/account/, { timeout: 15_000 });
   });
 
+  test('should allow switching channel after browser back (SMS → Email)', async ({ page, context }) => {
+    await context.clearCookies();
+    await clearMailpit(page);
+
+    await page.goto(`${KEYCLOAK_URL}/realms/${REALM}/account`);
+    await page.waitForSelector('#username', { timeout: 15_000 });
+    await page.fill('#username', TEST_USER);
+    await page.click('#kc-login');
+
+    // Select SMS first
+    await page.waitForSelector('#kc-otp-channel-select-form', { timeout: 15_000 });
+    await page.click('button[value="sms"]');
+    await page.waitForSelector('#kc-sms-otp-form', { timeout: 15_000 });
+
+    // Press browser back to return to channel selection
+    await page.goBack();
+    await page.waitForSelector('#kc-otp-channel-select-form', { timeout: 15_000 });
+
+    // Now select Email instead
+    await page.click('button[value="email"]');
+    await page.waitForSelector('#kc-email-otp-form', { timeout: 15_000 });
+
+    // Get OTP from Mailpit and complete login
+    const otpCode = await getEmailOtpCode(page);
+    expect(otpCode).toMatch(/^\d{6}$/);
+    await page.fill('#otp', otpCode);
+    await page.click('#kc-login');
+
+    await page.waitForURL(/\/realms\/otp-demo\/account/, { timeout: 15_000 });
+  });
+
+  test('should allow switching channel after browser back (Email → SMS)', async ({ page, context }) => {
+    await context.clearCookies();
+    await clearMailpit(page);
+
+    await page.goto(`${KEYCLOAK_URL}/realms/${REALM}/account`);
+    await page.waitForSelector('#username', { timeout: 15_000 });
+    await page.fill('#username', TEST_USER);
+    await page.click('#kc-login');
+
+    // Select Email first
+    await page.waitForSelector('#kc-otp-channel-select-form', { timeout: 15_000 });
+    await page.click('button[value="email"]');
+    await page.waitForSelector('#kc-email-otp-form', { timeout: 15_000 });
+
+    // Press browser back to return to channel selection
+    await page.goBack();
+    await page.waitForSelector('#kc-otp-channel-select-form', { timeout: 15_000 });
+
+    // Now select SMS instead
+    await page.click('button[value="sms"]');
+    await page.waitForSelector('#kc-sms-otp-form', { timeout: 15_000 });
+
+    // Get OTP from logs and complete login
+    const otpCode = await getSmsOtpCodeFromLogs();
+    await page.fill('#otp', otpCode);
+    await page.click('#kc-login');
+
+    await page.waitForURL(/\/realms\/otp-demo\/account/, { timeout: 15_000 });
+  });
+
   test('should reject invalid OTP after channel selection', async ({ page, context }) => {
     await context.clearCookies();
     await page.goto(`${KEYCLOAK_URL}/realms/${REALM}/account`);
