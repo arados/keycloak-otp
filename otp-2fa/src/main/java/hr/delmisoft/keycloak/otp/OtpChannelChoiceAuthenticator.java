@@ -57,15 +57,21 @@ public class OtpChannelChoiceAuthenticator implements Authenticator {
 
     @Override
     public void action(AuthenticationFlowContext context) {
-        AuthenticationSessionModel authSession = context.getAuthenticationSession();
-        String selectedChannel = authSession.getAuthNote(AUTH_NOTE_CHANNEL);
+        String channelParam = context.getHttpRequest().getDecodedFormParameters().getFirst(PARAM_CHANNEL);
 
-        if (selectedChannel == null) {
-            // Phase 1: user is selecting a channel
+        if (channelParam != null) {
+            // User is selecting (or re-selecting) a channel — handles browser back + resubmit
             handleChannelSelection(context);
         } else {
-            // Phase 2: user is submitting an OTP code
-            handleOtpVerification(context, selectedChannel);
+            AuthenticationSessionModel authSession = context.getAuthenticationSession();
+            String selectedChannel = authSession.getAuthNote(AUTH_NOTE_CHANNEL);
+            if (selectedChannel == null) {
+                // No channel in session and no channel param — restart selection
+                authenticate(context);
+            } else {
+                // Phase 2: user is submitting an OTP code
+                handleOtpVerification(context, selectedChannel);
+            }
         }
     }
 
@@ -80,7 +86,11 @@ public class OtpChannelChoiceAuthenticator implements Authenticator {
         int ttl = getConfigInt(context, OtpChannelChoiceConst.CONFIG_TTL, OtpChannelChoiceConst.DEFAULT_TTL);
         String code = generateCode(codeLength);
 
+        // Clear any previous OTP state (handles browser back + re-selection)
         AuthenticationSessionModel authSession = context.getAuthenticationSession();
+        authSession.removeAuthNote(AUTH_NOTE_CODE);
+        authSession.removeAuthNote(AUTH_NOTE_EXPIRY);
+        authSession.removeAuthNote(AUTH_NOTE_ATTEMPTS);
         authSession.setAuthNote(AUTH_NOTE_CHANNEL, channel);
         authSession.setAuthNote(AUTH_NOTE_CODE, code);
         authSession.setAuthNote(AUTH_NOTE_EXPIRY, String.valueOf(Time.currentTime() + ttl));
