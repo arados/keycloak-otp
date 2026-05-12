@@ -69,6 +69,15 @@
         </dependencies>
     </dependencyManagement>
 
+    <profiles>
+        <profile>
+            <id>e2e</id>
+            <modules>
+                <module>e2e</module>
+            </modules>
+        </profile>
+    </profiles>
+
     <build>
         <pluginManagement>
             <plugins>

@@ -357,7 +357,19 @@ Unit tests use JUnit 5 and Mockito to test authenticator logic against mocked Ke
 
 Browser-based integration tests that verify the full OTP login flow against a running Keycloak instance.
 
+**One-shot via Maven (recommended — manages the docker compose stack automatically):**
+
 ```bash
+mvn verify -P e2e
+```
+
+The `e2e` profile activates a Maven module that brings up `docker compose`, waits for Keycloak readiness, runs the full Playwright suite, and tears the stack down — regardless of test outcome. A failed run propagates as a Maven build failure. Default `mvn verify` is unchanged (unit tests only).
+
+**Direct (faster local iteration; requires the stack already up):**
+
+```bash
+docker compose up --build -d
+
 cd e2e
 npm install
 npx playwright install chromium
@@ -366,7 +378,7 @@ npm run test:sms            # Run SMS OTP tests only
 npm run test:headed         # Run with visible browser
 ```
 
-Requires Docker services to be running (`docker compose up --build -d`). Tests cover:
+Tests cover:
 - SMS OTP login flow (form rendering, valid/invalid codes, post-login account access)
 - OTP login via custom client (`otp-demo-client`)
 - OTP channel choice flow (email or SMS selection)

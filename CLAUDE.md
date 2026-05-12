@@ -95,13 +95,23 @@ themes (no Java dependencies)
 
 **Unit tests** live alongside each module (`common/src/test/`, `otp-2fa/src/test/`, `otp-login/src/test/`). JUnit 5 + Mockito mocking Keycloak's session/realm/user model interfaces.
 
-**E2E tests** in `e2e/` use Playwright (Chromium) against a running Docker instance:
+**E2E tests** in `e2e/` use Playwright (Chromium) against a running Docker instance.
+
+Two ways to run them:
 
 ```bash
+# Direct (requires you to `docker compose up` first):
 cd e2e && npm test                           # Run all E2E tests
 cd e2e && npm run test:sms                   # SMS OTP tests only
 cd e2e && npm run test:headed                # Run with visible browser
+
+# Maven-integrated (handles docker compose up/down automatically):
+mvn verify -P e2e                            # Unit tests + docker up + Playwright + docker down
 ```
+
+The `e2e` Maven module (activated by the `-P e2e` profile) is wired into the standard `pre-integration-test` → `integration-test` → `post-integration-test` → `verify` lifecycle via `maven-antrun-plugin`: it brings up `docker compose`, polls until Keycloak is reachable, runs `npx playwright test`, then tears the stack down regardless of test outcome. A failing test run propagates as a Maven build failure via a recorded exit code in `e2e/target/e2e-exit-code.txt`.
+
+> The demo realm sets `sendCooldown=2s` (and `otp.sendCooldown=2s` for grant types) so the resend E2E tests can exercise both the throttled-then-allowed transitions without long waits.
 
 E2E tests extract SMS OTP codes from Docker logs (`LogSmsSenderFactory` output) and email OTP codes from Mailpit API.
 

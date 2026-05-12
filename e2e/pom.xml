@@ -1,0 +1,136 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>hr.delmisoft.keycloak</groupId>
+        <artifactId>keycloak-otp-parent</artifactId>
+        <version>1.0.0-SNAPSHOT</version>
+        <relativePath>../pom.xml</relativePath>
+    </parent>
+
+    <artifactId>keycloak-otp-e2e</artifactId>
+    <packaging>pom</packaging>
+    <description>Playwright end-to-end tests. Activate with `mvn verify -P e2e`. Manages the docker compose lifecycle automatically.</description>
+
+    <properties>
+        <e2e.keycloak.url>http://localhost:8080</e2e.keycloak.url>
+        <e2e.realm>otp-demo</e2e.realm>
+        <e2e.readiness.url>${e2e.keycloak.url}/realms/${e2e.realm}/.well-known/openid-configuration</e2e.readiness.url>
+        <e2e.readiness.maxAttempts>90</e2e.readiness.maxAttempts>
+        <e2e.readiness.sleepSeconds>2</e2e.readiness.sleepSeconds>
+        <e2e.exitCodeFile>${project.build.directory}/e2e-exit-code.txt</e2e.exitCodeFile>
+    </properties>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-antrun-plugin</artifactId>
+                <version>3.1.0</version>
+                <executions>
+                    <!-- Bring up Keycloak + Mailpit and wait for readiness -->
+                    <execution>
+                        <id>e2e-docker-up</id>
+                        <phase>pre-integration-test</phase>
+                        <goals><goal>run</goal></goals>
+                        <configuration>
+                            <target>
+                                <echo message="==&gt; Tearing down any existing stack" />
+                                <exec executable="docker" dir="${project.basedir}/.." failonerror="false">
+                                    <arg value="compose" />
+                                    <arg value="down" />
+                                    <arg value="-v" />
+                                </exec>
+
+                                <echo message="==&gt; Building and starting docker compose stack" />
+                                <exec executable="docker" dir="${project.basedir}/.." failonerror="true">
+                                    <arg value="compose" />
+                                    <arg value="up" />
+                                    <arg value="--build" />
+                                    <arg value="-d" />
+                                </exec>
+
+                                <echo message="==&gt; Waiting for Keycloak readiness at ${e2e.readiness.url}" />
+                                <exec executable="sh" failonerror="true">
+                                    <arg value="-c" />
+                                    <arg value="for i in $(seq 1 ${e2e.readiness.maxAttempts}); do curl -sf ${e2e.readiness.url} &gt;/dev/null 2&gt;&amp;1 &amp;&amp; echo &quot;ready after $((i*${e2e.readiness.sleepSeconds}))s&quot; &amp;&amp; exit 0; sleep ${e2e.readiness.sleepSeconds}; done; echo &quot;Keycloak did not become ready in time&quot;; exit 1" />
+                                </exec>
+                            </target>
+                        </configuration>
+                    </execution>
+
+                    <!-- Install npm deps + Playwright browsers, then run the tests.
+                         failonerror=false on the test step so post-integration-test still runs (docker down).
+                         The verify execution below promotes the recorded exit code into a build failure. -->
+                    <execution>
+                        <id>e2e-run-tests</id>
+                        <phase>integration-test</phase>
+                        <goals><goal>run</goal></goals>
+                        <configuration>
+                            <target>
+                                <echo message="==&gt; npm ci" />
+                                <exec executable="npm" dir="${project.basedir}" failonerror="true">
+                                    <arg value="ci" />
+                                </exec>
+
+                                <echo message="==&gt; Installing Playwright Chromium" />
+                                <exec executable="npx" dir="${project.basedir}" failonerror="true">
+                                    <arg value="playwright" />
+                                    <arg value="install" />
+                                    <arg value="chromium" />
+                                </exec>
+
+                                <echo message="==&gt; Running Playwright tests" />
+                                <mkdir dir="${project.build.directory}" />
+                                <exec executable="npx" dir="${project.basedir}" failonerror="false" resultproperty="e2e.exit">
+                                    <arg value="playwright" />
+                                    <arg value="test" />
+                                </exec>
+                                <echo file="${e2e.exitCodeFile}" message="${e2e.exit}" />
+                            </target>
+                        </configuration>
+                    </execution>
+
+                    <!-- Always tear the stack down, even if tests failed. -->
+                    <execution>
+                        <id>e2e-docker-down</id>
+                        <phase>post-integration-test</phase>
+                        <goals><goal>run</goal></goals>
+                        <configuration>
+                            <target>
+                                <echo message="==&gt; Tearing down docker compose stack" />
+                                <exec executable="docker" dir="${project.basedir}/.." failonerror="false">
+                                    <arg value="compose" />
+                                    <arg value="down" />
+                                    <arg value="-v" />
+                                </exec>
+                            </target>
+                        </configuration>
+                    </execution>
+
+                    <!-- Propagate the recorded Playwright exit code into a build failure. -->
+                    <execution>
+                        <id>e2e-verify</id>
+                        <phase>verify</phase>
+                        <goals><goal>run</goal></goals>
+                        <configuration>
+                            <target>
+                                <loadfile property="e2e.exit.recorded" srcFile="${e2e.exitCodeFile}" />
+                                <fail message="Playwright E2E tests failed (exit code ${e2e.exit.recorded})">
+                                    <condition>
+                                        <not>
+                                            <equals arg1="${e2e.exit.recorded}" arg2="0" trim="true" />
+                                        </not>
+                                    </condition>
+                                </fail>
+                            </target>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+</project>
