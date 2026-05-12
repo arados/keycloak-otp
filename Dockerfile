@@ -13,7 +13,7 @@ COPY otp-login/src otp-login/src
 COPY themes/src themes/src
 RUN mvn clean package -DskipTests -B
 
-FROM quay.io/keycloak/keycloak:26.5.5 AS keycloak
+FROM quay.io/keycloak/keycloak:26.6.1 AS keycloak
 COPY --from=builder /build/dist/target/keycloak-otp-1.0.0-SNAPSHOT.jar /opt/keycloak/providers/
 COPY realm-export.json /opt/keycloak/data/import/realm-export.json
 RUN /opt/keycloak/bin/kc.sh build
