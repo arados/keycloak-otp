@@ -11,9 +11,11 @@ public final class OtpChannelChoiceConst {
     public static final String CONFIG_TTL = "otpChoice.ttl";
     public static final String CONFIG_MAX_RETRIES = "otpChoice.maxRetries";
     public static final String CONFIG_PHONE_ATTRIBUTE = "otpChoice.phoneAttribute";
+    public static final String CONFIG_SEND_COOLDOWN = "otpChoice.sendCooldown";
 
     // Defaults
     public static final int DEFAULT_CODE_LENGTH = 6;
     public static final int DEFAULT_TTL = 300;
     public static final int DEFAULT_MAX_RETRIES = 3;
+    public static final int DEFAULT_SEND_COOLDOWN = 60;
 }

@@ -2,6 +2,7 @@ package hr.delmisoft.keycloak.otp.grant;
 
 import org.keycloak.models.UserModel;
 
+import hr.delmisoft.keycloak.otp.OtpSendThrottle;
 import hr.delmisoft.keycloak.otp.sms.SmsOtpConst;
 import hr.delmisoft.keycloak.otp.sms.SmsProvider;
 
@@ -53,5 +54,10 @@ public class SmsOtpGrantType extends AbstractOtpGrantType {
     @Override
     protected String getMaxRetriesError() {
         return SmsOtpConst.ERROR_OTP_MAX_RETRIES;
+    }
+
+    @Override
+    protected String getChannel() {
+        return OtpSendThrottle.CHANNEL_SMS;
     }
 }

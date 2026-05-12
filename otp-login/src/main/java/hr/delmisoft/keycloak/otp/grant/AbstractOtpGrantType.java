@@ -32,6 +32,8 @@ import org.keycloak.sessions.RootAuthenticationSessionModel;
 
 import org.jboss.logging.Logger;
 
+import hr.delmisoft.keycloak.otp.OtpSendThrottle;
+
 /**
  * Base class for OTP-based custom OAuth2 grant types.
  * Handles two-phase OTP flow: request OTP → verify OTP → issue tokens.
@@ -117,6 +119,22 @@ public abstract class AbstractOtpGrantType extends OAuth2GrantTypeBase {
      * Phase 1: Generate and send OTP, return 401 with session ID.
      */
     private Response handlePhase1(UserModel user) {
+        int cooldown = resolveCooldown();
+        if (!OtpSendThrottle.tryReserve(session, realm, user, getChannel(), cooldown)) {
+            int retryAfter = OtpSendThrottle.remainingSeconds(session, realm, user, getChannel());
+            event.error(Errors.NOT_ALLOWED);
+            Map<String, Object> body = new HashMap<>();
+            body.put("error", "otp_send_throttled");
+            body.put("error_description", "Too many OTP send requests. Retry in " + retryAfter + " seconds.");
+            body.put("retry_after", retryAfter);
+            cors.add();
+            return Response.status(429)
+                    .header("Retry-After", String.valueOf(retryAfter))
+                    .entity(body)
+                    .type(MediaType.APPLICATION_JSON_TYPE)
+                    .build();
+        }
+
         String code = generateCode(DEFAULT_CODE_LENGTH);
         String sessionId = UUID.randomUUID().toString();
 
@@ -148,6 +166,23 @@ public abstract class AbstractOtpGrantType extends OAuth2GrantTypeBase {
                 .entity(body)
                 .type(MediaType.APPLICATION_JSON_TYPE)
                 .build();
+    }
+
+    /**
+     * Resolves the send cooldown (seconds) from the realm attribute {@code otp.sendCooldown},
+     * falling back to {@link OtpSendThrottle#DEFAULT_SEND_COOLDOWN}.
+     */
+    private int resolveCooldown() {
+        String configured = realm.getAttribute(OtpSendThrottle.CONFIG_SEND_COOLDOWN);
+        if (configured == null || configured.isBlank()) {
+            return OtpSendThrottle.DEFAULT_SEND_COOLDOWN;
+        }
+        try {
+            int parsed = Integer.parseInt(configured);
+            return parsed >= 0 ? parsed : OtpSendThrottle.DEFAULT_SEND_COOLDOWN;
+        } catch (NumberFormatException e) {
+            return OtpSendThrottle.DEFAULT_SEND_COOLDOWN;
+        }
     }
 
     /**
@@ -282,4 +317,7 @@ public abstract class AbstractOtpGrantType extends OAuth2GrantTypeBase {
 
     /** Error code for max retries exceeded. */
     protected abstract String getMaxRetriesError();
+
+    /** Throttle channel name (e.g. {@code "email"} or {@code "sms"}). */
+    protected abstract String getChannel();
 }

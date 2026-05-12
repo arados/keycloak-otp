@@ -46,12 +46,13 @@ class EmailOtpAuthenticatorFactoryTest {
     }
 
     @Test
-    void getConfigProperties_returnsThreeProperties() {
+    void getConfigProperties_returnsFourProperties() {
         List<ProviderConfigProperty> props = factory.getConfigProperties();
-        assertThat(props, hasSize(3));
+        assertThat(props, hasSize(4));
         assertThat(props.get(0).getName(), equalTo(EmailOtpConst.CONFIG_CODE_LENGTH));
         assertThat(props.get(1).getName(), equalTo(EmailOtpConst.CONFIG_TTL));
         assertThat(props.get(2).getName(), equalTo(EmailOtpConst.CONFIG_MAX_RETRIES));
+        assertThat(props.get(3).getName(), equalTo(EmailOtpConst.CONFIG_SEND_COOLDOWN));
     }
 
     @Test
@@ -60,6 +61,7 @@ class EmailOtpAuthenticatorFactoryTest {
         assertThat(props.get(0).getDefaultValue(), equalTo(String.valueOf(EmailOtpConst.DEFAULT_CODE_LENGTH)));
         assertThat(props.get(1).getDefaultValue(), equalTo(String.valueOf(EmailOtpConst.DEFAULT_TTL)));
         assertThat(props.get(2).getDefaultValue(), equalTo(String.valueOf(EmailOtpConst.DEFAULT_MAX_RETRIES)));
+        assertThat(props.get(3).getDefaultValue(), equalTo(String.valueOf(EmailOtpConst.DEFAULT_SEND_COOLDOWN)));
     }
 
     @Test

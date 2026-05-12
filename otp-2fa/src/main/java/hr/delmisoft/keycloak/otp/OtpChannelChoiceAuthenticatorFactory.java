@@ -81,7 +81,14 @@ public class OtpChannelChoiceAuthenticatorFactory implements AuthenticatorFactor
         phoneAttr.setType(ProviderConfigProperty.STRING_TYPE);
         phoneAttr.setDefaultValue(SmsOtpConst.DEFAULT_PHONE_ATTRIBUTE);
 
-        return List.of(codeLength, ttl, maxRetries, phoneAttr);
+        ProviderConfigProperty sendCooldown = new ProviderConfigProperty();
+        sendCooldown.setName(OtpChannelChoiceConst.CONFIG_SEND_COOLDOWN);
+        sendCooldown.setLabel("Send Cooldown (seconds)");
+        sendCooldown.setHelpText("Minimum interval between OTP sends per user, per channel. Resend is disabled until this elapses. Set to 0 to disable throttling. Should be < Code TTL.");
+        sendCooldown.setType(ProviderConfigProperty.STRING_TYPE);
+        sendCooldown.setDefaultValue(String.valueOf(OtpChannelChoiceConst.DEFAULT_SEND_COOLDOWN));
+
+        return List.of(codeLength, ttl, maxRetries, phoneAttr, sendCooldown);
     }
 
     @Override

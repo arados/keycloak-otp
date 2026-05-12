@@ -14,31 +14,40 @@ import org.keycloak.models.RealmModel;
 import org.keycloak.models.UserModel;
 import org.keycloak.sessions.AuthenticationSessionModel;
 
+import hr.delmisoft.keycloak.otp.OtpSendThrottle;
+
 public class SmsOtpAuthenticator implements Authenticator {
 
     private static final SecureRandom RANDOM = new SecureRandom();
 
     @Override
     public void authenticate(AuthenticationFlowContext context) {
-        int codeLength = getConfigInt(context, SmsOtpConst.CONFIG_CODE_LENGTH, SmsOtpConst.DEFAULT_CODE_LENGTH);
-        int ttl = getConfigInt(context, SmsOtpConst.CONFIG_TTL, SmsOtpConst.DEFAULT_TTL);
-
-        String code = generateCode(codeLength);
-
         AuthenticationSessionModel authSession = context.getAuthenticationSession();
-        authSession.setAuthNote(SmsOtpConst.AUTH_NOTE_CODE, code);
-        authSession.setAuthNote(SmsOtpConst.AUTH_NOTE_EXPIRY, String.valueOf(Time.currentTime() + ttl));
-        authSession.setAuthNote(SmsOtpConst.AUTH_NOTE_ATTEMPTS, "0");
+        String existingCode = authSession.getAuthNote(SmsOtpConst.AUTH_NOTE_CODE);
+        String expiryStr = authSession.getAuthNote(SmsOtpConst.AUTH_NOTE_EXPIRY);
 
-        if (!sendSms(context, code)) {
-            return;
+        if (existingCode != null && expiryStr != null) {
+            try {
+                if (Time.currentTime() < Integer.parseInt(expiryStr)) {
+                    challengeOtpForm(context);
+                    return;
+                }
+            } catch (NumberFormatException ignored) {
+                // fall through and try a fresh send
+            }
         }
 
-        context.challenge(context.form().createForm(SmsOtpConst.LOGIN_TEMPLATE));
+        sendCode(context, /* honourThrottle= */ false);
     }
 
     @Override
     public void action(AuthenticationFlowContext context) {
+        String resendParam = context.getHttpRequest().getDecodedFormParameters().getFirst(SmsOtpConst.PARAM_RESEND);
+        if ("true".equalsIgnoreCase(resendParam)) {
+            sendCode(context, /* honourThrottle= */ true);
+            return;
+        }
+
         String enteredOtp = context.getHttpRequest().getDecodedFormParameters().getFirst(SmsOtpConst.PARAM_OTP);
         if (enteredOtp == null || enteredOtp.isBlank()) {
             context.failureChallenge(AuthenticationFlowError.INVALID_CREDENTIALS,
@@ -52,7 +61,7 @@ public class SmsOtpAuthenticator implements Authenticator {
         String attemptsStr = authSession.getAuthNote(SmsOtpConst.AUTH_NOTE_ATTEMPTS);
 
         if (storedCode == null || expiryStr == null || attemptsStr == null) {
-            authenticate(context);
+            sendCode(context, /* honourThrottle= */ false);
             return;
         }
 
@@ -60,28 +69,17 @@ public class SmsOtpAuthenticator implements Authenticator {
         int attempts = Integer.parseInt(attemptsStr);
         int maxRetries = getConfigInt(context, SmsOtpConst.CONFIG_MAX_RETRIES, SmsOtpConst.DEFAULT_MAX_RETRIES);
 
-        // Check expiry — resend a new code if expired
         if (Time.currentTime() > expiry) {
-            int codeLength = getConfigInt(context, SmsOtpConst.CONFIG_CODE_LENGTH, SmsOtpConst.DEFAULT_CODE_LENGTH);
-            int newTtl = getConfigInt(context, SmsOtpConst.CONFIG_TTL, SmsOtpConst.DEFAULT_TTL);
-            String newCode = generateCode(codeLength);
-            authSession.setAuthNote(SmsOtpConst.AUTH_NOTE_CODE, newCode);
-            authSession.setAuthNote(SmsOtpConst.AUTH_NOTE_EXPIRY, String.valueOf(Time.currentTime() + newTtl));
-            authSession.setAuthNote(SmsOtpConst.AUTH_NOTE_ATTEMPTS, "0");
-            sendSms(context, newCode);
-            context.failureChallenge(AuthenticationFlowError.EXPIRED_CODE,
-                    context.form().setError(SmsOtpConst.ERROR_OTP_EXPIRED).createForm(SmsOtpConst.LOGIN_TEMPLATE));
+            sendNewCodeOnExpiry(context);
             return;
         }
 
-        // Check attempts
         if (attempts >= maxRetries) {
             context.failureChallenge(AuthenticationFlowError.INVALID_CREDENTIALS,
                     context.form().setError(SmsOtpConst.ERROR_OTP_MAX_RETRIES).createForm(SmsOtpConst.LOGIN_TEMPLATE));
             return;
         }
 
-        // Constant-time comparison
         if (MessageDigest.isEqual(storedCode.getBytes(StandardCharsets.UTF_8), enteredOtp.getBytes(StandardCharsets.UTF_8))) {
             context.success();
         } else {
@@ -108,6 +106,68 @@ public class SmsOtpAuthenticator implements Authenticator {
 
     @Override
     public void close() {
+    }
+
+    private void sendCode(AuthenticationFlowContext context, boolean honourThrottle) {
+        int cooldown = getConfigInt(context, SmsOtpConst.CONFIG_SEND_COOLDOWN, SmsOtpConst.DEFAULT_SEND_COOLDOWN);
+        if (honourThrottle && !OtpSendThrottle.tryReserve(context.getSession(), context.getRealm(), context.getUser(),
+                OtpSendThrottle.CHANNEL_SMS, cooldown)) {
+            challengeOtpForm(context);
+            return;
+        }
+        if (!honourThrottle) {
+            OtpSendThrottle.tryReserve(context.getSession(), context.getRealm(), context.getUser(),
+                    OtpSendThrottle.CHANNEL_SMS, cooldown);
+        }
+
+        int codeLength = getConfigInt(context, SmsOtpConst.CONFIG_CODE_LENGTH, SmsOtpConst.DEFAULT_CODE_LENGTH);
+        int ttl = getConfigInt(context, SmsOtpConst.CONFIG_TTL, SmsOtpConst.DEFAULT_TTL);
+        String code = generateCode(codeLength);
+
+        AuthenticationSessionModel authSession = context.getAuthenticationSession();
+        authSession.setAuthNote(SmsOtpConst.AUTH_NOTE_CODE, code);
+        authSession.setAuthNote(SmsOtpConst.AUTH_NOTE_EXPIRY, String.valueOf(Time.currentTime() + ttl));
+        authSession.setAuthNote(SmsOtpConst.AUTH_NOTE_ATTEMPTS, "0");
+        authSession.setAuthNote(SmsOtpConst.AUTH_NOTE_LAST_SENT, String.valueOf(Time.currentTime()));
+
+        if (!sendSms(context, code)) {
+            return;
+        }
+
+        challengeOtpForm(context);
+    }
+
+    private void sendNewCodeOnExpiry(AuthenticationFlowContext context) {
+        int cooldown = getConfigInt(context, SmsOtpConst.CONFIG_SEND_COOLDOWN, SmsOtpConst.DEFAULT_SEND_COOLDOWN);
+        boolean reserved = OtpSendThrottle.tryReserve(context.getSession(), context.getRealm(), context.getUser(),
+                OtpSendThrottle.CHANNEL_SMS, cooldown);
+        if (reserved) {
+            int codeLength = getConfigInt(context, SmsOtpConst.CONFIG_CODE_LENGTH, SmsOtpConst.DEFAULT_CODE_LENGTH);
+            int ttl = getConfigInt(context, SmsOtpConst.CONFIG_TTL, SmsOtpConst.DEFAULT_TTL);
+            String newCode = generateCode(codeLength);
+            AuthenticationSessionModel authSession = context.getAuthenticationSession();
+            authSession.setAuthNote(SmsOtpConst.AUTH_NOTE_CODE, newCode);
+            authSession.setAuthNote(SmsOtpConst.AUTH_NOTE_EXPIRY, String.valueOf(Time.currentTime() + ttl));
+            authSession.setAuthNote(SmsOtpConst.AUTH_NOTE_ATTEMPTS, "0");
+            authSession.setAuthNote(SmsOtpConst.AUTH_NOTE_LAST_SENT, String.valueOf(Time.currentTime()));
+            sendSms(context, newCode);
+        }
+        context.failureChallenge(AuthenticationFlowError.EXPIRED_CODE,
+                context.form()
+                        .setAttribute("resendAvailableInSeconds", resendAvailableInSeconds(context))
+                        .setError(SmsOtpConst.ERROR_OTP_EXPIRED)
+                        .createForm(SmsOtpConst.LOGIN_TEMPLATE));
+    }
+
+    private void challengeOtpForm(AuthenticationFlowContext context) {
+        context.challenge(context.form()
+                .setAttribute("resendAvailableInSeconds", resendAvailableInSeconds(context))
+                .createForm(SmsOtpConst.LOGIN_TEMPLATE));
+    }
+
+    private int resendAvailableInSeconds(AuthenticationFlowContext context) {
+        return OtpSendThrottle.remainingSeconds(context.getSession(), context.getRealm(),
+                context.getUser(), OtpSendThrottle.CHANNEL_SMS);
     }
 
     private boolean sendSms(AuthenticationFlowContext context, String code) {

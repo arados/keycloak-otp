@@ -7,6 +7,7 @@ import org.keycloak.email.EmailTemplateProvider;
 import org.keycloak.models.UserModel;
 
 import hr.delmisoft.keycloak.otp.EmailOtpConst;
+import hr.delmisoft.keycloak.otp.OtpSendThrottle;
 
 /**
  * Custom OAuth2 grant type for Email OTP authentication.
@@ -55,5 +56,10 @@ public class EmailOtpGrantType extends AbstractOtpGrantType {
     @Override
     protected String getMaxRetriesError() {
         return EmailOtpConst.ERROR_OTP_MAX_RETRIES;
+    }
+
+    @Override
+    protected String getChannel() {
+        return OtpSendThrottle.CHANNEL_EMAIL;
     }
 }

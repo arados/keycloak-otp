@@ -72,7 +72,14 @@ public class EmailOtpAuthenticatorFactory implements AuthenticatorFactory {
         maxRetries.setType(ProviderConfigProperty.STRING_TYPE);
         maxRetries.setDefaultValue(String.valueOf(EmailOtpConst.DEFAULT_MAX_RETRIES));
 
-        return List.of(codeLength, ttl, maxRetries);
+        ProviderConfigProperty sendCooldown = new ProviderConfigProperty();
+        sendCooldown.setName(EmailOtpConst.CONFIG_SEND_COOLDOWN);
+        sendCooldown.setLabel("Send Cooldown (seconds)");
+        sendCooldown.setHelpText("Minimum interval between OTP email sends per user. Resend is disabled until this elapses. Set to 0 to disable throttling. Should be < Code TTL.");
+        sendCooldown.setType(ProviderConfigProperty.STRING_TYPE);
+        sendCooldown.setDefaultValue(String.valueOf(EmailOtpConst.DEFAULT_SEND_COOLDOWN));
+
+        return List.of(codeLength, ttl, maxRetries, sendCooldown);
     }
 
     @Override

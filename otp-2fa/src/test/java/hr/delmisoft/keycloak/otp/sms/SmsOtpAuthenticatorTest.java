@@ -18,6 +18,7 @@ import org.keycloak.http.HttpRequest;
 import org.keycloak.models.AuthenticatorConfigModel;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
+import org.keycloak.models.SingleUseObjectProvider;
 import org.keycloak.models.UserModel;
 import org.keycloak.sessions.AuthenticationSessionModel;
 import org.mockito.ArgumentCaptor;
@@ -30,6 +31,7 @@ import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
@@ -53,6 +55,7 @@ class SmsOtpAuthenticatorTest {
     @Mock private HttpRequest httpRequest;
     @Mock private AuthenticatorConfigModel authenticatorConfig;
     @Mock private Response formResponse;
+    @Mock private SingleUseObjectProvider singleUseStore;
 
     @BeforeEach
     void setUp() {
@@ -61,17 +64,23 @@ class SmsOtpAuthenticatorTest {
 
     private void setupCommonMocks() {
         when(context.getSession()).thenReturn(session);
+        when(context.getRealm()).thenReturn(realm);
         when(context.getUser()).thenReturn(user);
         when(context.getAuthenticationSession()).thenReturn(authSession);
         when(context.getAuthenticatorConfig()).thenReturn(null);
         when(user.getFirstAttribute(SmsOtpConst.DEFAULT_PHONE_ATTRIBUTE)).thenReturn("+1234567890");
         when(session.getProvider(SmsProvider.class)).thenReturn(smsProvider);
+        when(session.getProvider(SingleUseObjectProvider.class)).thenReturn(singleUseStore);
+        when(realm.getId()).thenReturn("realm-1");
+        when(user.getId()).thenReturn("user-1");
+        when(singleUseStore.putIfAbsent(anyString(), anyLong())).thenReturn(true);
     }
 
     @Test
     void authenticate_sendsSmsAndChallenge() throws Exception {
         setupCommonMocks();
         when(context.form()).thenReturn(form);
+        when(form.setAttribute(anyString(), any())).thenReturn(form);
         when(form.createForm(SmsOtpConst.LOGIN_TEMPLATE)).thenReturn(formResponse);
 
         authenticator.authenticate(context);
@@ -87,6 +96,7 @@ class SmsOtpAuthenticatorTest {
     void authenticate_smsFailure_returnsError() throws Exception {
         setupCommonMocks();
         when(context.form()).thenReturn(form);
+        when(form.setAttribute(anyString(), any())).thenReturn(form);
         when(form.setError(anyString())).thenReturn(form);
         when(form.createErrorPage(any())).thenReturn(formResponse);
         doThrow(new SmsException("fail")).when(smsProvider).send(anyString(), anyString());
@@ -99,12 +109,10 @@ class SmsOtpAuthenticatorTest {
 
     @Test
     void authenticate_noPhoneNumber_fails() {
-        when(context.getSession()).thenReturn(session);
-        when(context.getUser()).thenReturn(user);
-        when(context.getAuthenticationSession()).thenReturn(authSession);
-        when(context.getAuthenticatorConfig()).thenReturn(null);
+        setupCommonMocks();
         when(user.getFirstAttribute(SmsOtpConst.DEFAULT_PHONE_ATTRIBUTE)).thenReturn(null);
         when(context.form()).thenReturn(form);
+        when(form.setAttribute(anyString(), any())).thenReturn(form);
         when(form.setError(anyString())).thenReturn(form);
         when(form.createErrorPage(any())).thenReturn(formResponse);
 
@@ -144,6 +152,7 @@ class SmsOtpAuthenticatorTest {
         when(authSession.getAuthNote(SmsOtpConst.AUTH_NOTE_EXPIRY)).thenReturn(String.valueOf(Time.currentTime() + 300));
         when(authSession.getAuthNote(SmsOtpConst.AUTH_NOTE_ATTEMPTS)).thenReturn("0");
         when(context.form()).thenReturn(form);
+        when(form.setAttribute(anyString(), any())).thenReturn(form);
         when(form.setError(anyString())).thenReturn(form);
         when(form.createForm(anyString())).thenReturn(formResponse);
 
@@ -162,6 +171,7 @@ class SmsOtpAuthenticatorTest {
         when(context.getHttpRequest()).thenReturn(httpRequest);
         when(httpRequest.getDecodedFormParameters()).thenReturn(formParams);
         when(context.form()).thenReturn(form);
+        when(form.setAttribute(anyString(), any())).thenReturn(form);
         when(form.setError(anyString())).thenReturn(form);
         when(form.createForm(anyString())).thenReturn(formResponse);
 
@@ -182,6 +192,7 @@ class SmsOtpAuthenticatorTest {
         when(authSession.getAuthNote(SmsOtpConst.AUTH_NOTE_EXPIRY)).thenReturn(String.valueOf(Time.currentTime() - 10));
         when(authSession.getAuthNote(SmsOtpConst.AUTH_NOTE_ATTEMPTS)).thenReturn("0");
         when(context.form()).thenReturn(form);
+        when(form.setAttribute(anyString(), any())).thenReturn(form);
         when(form.setError(anyString())).thenReturn(form);
         when(form.createForm(anyString())).thenReturn(formResponse);
 
@@ -207,6 +218,7 @@ class SmsOtpAuthenticatorTest {
         when(authSession.getAuthNote(SmsOtpConst.AUTH_NOTE_EXPIRY)).thenReturn(String.valueOf(Time.currentTime() + 300));
         when(authSession.getAuthNote(SmsOtpConst.AUTH_NOTE_ATTEMPTS)).thenReturn("3");
         when(context.form()).thenReturn(form);
+        when(form.setAttribute(anyString(), any())).thenReturn(form);
         when(form.setError(anyString())).thenReturn(form);
         when(form.createForm(anyString())).thenReturn(formResponse);
 
@@ -227,6 +239,7 @@ class SmsOtpAuthenticatorTest {
         when(context.getAuthenticatorConfig()).thenReturn(authenticatorConfig);
         when(user.getFirstAttribute("mobile")).thenReturn("+9876543210");
         when(context.form()).thenReturn(form);
+        when(form.setAttribute(anyString(), any())).thenReturn(form);
         when(form.createForm(SmsOtpConst.LOGIN_TEMPLATE)).thenReturn(formResponse);
 
         authenticator.authenticate(context);
@@ -235,6 +248,78 @@ class SmsOtpAuthenticatorTest {
         verify(authSession).setAuthNote(eq(SmsOtpConst.AUTH_NOTE_CODE), codeCaptor.capture());
         assertThat(codeCaptor.getValue().length(), equalTo(8));
         verify(smsProvider).send(eq("+9876543210"), anyString());
+    }
+
+    @Test
+    void authenticate_refreshWithExistingValidCode_doesNotResend() throws Exception {
+        setupCommonMocks();
+        when(context.form()).thenReturn(form);
+        when(form.setAttribute(anyString(), any())).thenReturn(form);
+        when(form.createForm(SmsOtpConst.LOGIN_TEMPLATE)).thenReturn(formResponse);
+        when(authSession.getAuthNote(SmsOtpConst.AUTH_NOTE_CODE)).thenReturn("123456");
+        when(authSession.getAuthNote(SmsOtpConst.AUTH_NOTE_EXPIRY)).thenReturn(String.valueOf(Time.currentTime() + 200));
+
+        authenticator.authenticate(context);
+
+        verify(smsProvider, never()).send(anyString(), anyString());
+        verify(singleUseStore, never()).putIfAbsent(anyString(), anyLong());
+        verify(context).challenge(formResponse);
+    }
+
+    @Test
+    void authenticate_freshSessionBypassesThrottleEvenIfActive() throws Exception {
+        setupCommonMocks();
+        when(singleUseStore.putIfAbsent(anyString(), anyLong())).thenReturn(false);
+        when(context.form()).thenReturn(form);
+        when(form.setAttribute(anyString(), any())).thenReturn(form);
+        when(form.createForm(SmsOtpConst.LOGIN_TEMPLATE)).thenReturn(formResponse);
+
+        authenticator.authenticate(context);
+
+        verify(smsProvider).send(eq("+1234567890"), anyString());
+        verify(authSession).setAuthNote(eq(SmsOtpConst.AUTH_NOTE_CODE), anyString());
+        verify(context).challenge(formResponse);
+    }
+
+    @Test
+    void action_resendParamWhenAllowed_generatesAndSendsNewCode() throws Exception {
+        MultivaluedMap<String, String> formParams = new MultivaluedHashMap<>();
+        formParams.putSingle(SmsOtpConst.PARAM_RESEND, "true");
+
+        setupCommonMocks();
+        when(context.getHttpRequest()).thenReturn(httpRequest);
+        when(httpRequest.getDecodedFormParameters()).thenReturn(formParams);
+        when(context.form()).thenReturn(form);
+        when(form.setAttribute(anyString(), any())).thenReturn(form);
+        when(form.createForm(SmsOtpConst.LOGIN_TEMPLATE)).thenReturn(formResponse);
+
+        authenticator.action(context);
+
+        ArgumentCaptor<String> codeCaptor = ArgumentCaptor.forClass(String.class);
+        verify(authSession).setAuthNote(eq(SmsOtpConst.AUTH_NOTE_CODE), codeCaptor.capture());
+        verify(smsProvider).send(eq("+1234567890"), anyString());
+        verify(context).challenge(formResponse);
+        assertThat(codeCaptor.getValue().length(), equalTo(6));
+    }
+
+    @Test
+    void action_resendParamWhenThrottled_doesNotSend() throws Exception {
+        MultivaluedMap<String, String> formParams = new MultivaluedHashMap<>();
+        formParams.putSingle(SmsOtpConst.PARAM_RESEND, "true");
+
+        setupCommonMocks();
+        when(singleUseStore.putIfAbsent(anyString(), anyLong())).thenReturn(false);
+        when(context.getHttpRequest()).thenReturn(httpRequest);
+        when(httpRequest.getDecodedFormParameters()).thenReturn(formParams);
+        when(context.form()).thenReturn(form);
+        when(form.setAttribute(anyString(), any())).thenReturn(form);
+        when(form.createForm(SmsOtpConst.LOGIN_TEMPLATE)).thenReturn(formResponse);
+
+        authenticator.action(context);
+
+        verify(smsProvider, never()).send(anyString(), anyString());
+        verify(authSession, never()).setAuthNote(eq(SmsOtpConst.AUTH_NOTE_CODE), anyString());
+        verify(context).challenge(formResponse);
     }
 
     @Test

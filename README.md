@@ -104,6 +104,7 @@ All authenticators are configurable through the Keycloak admin console under the
 | `emailOtp.codeLength` | Code Length | `6` | Number of digits in the OTP code |
 | `emailOtp.ttl` | Code TTL (seconds) | `300` | Time-to-live for the OTP code |
 | `emailOtp.maxRetries` | Max Retries | `3` | Max failed attempts before invalidation |
+| `emailOtp.sendCooldown` | Send Cooldown (seconds) | `60` | Minimum interval between resends per user. Resend button is disabled while this elapses. Set to `0` to disable throttling. Should be `< ttl`. |
 
 ### SMS OTP
 
@@ -113,6 +114,31 @@ All authenticators are configurable through the Keycloak admin console under the
 | `smsOtp.ttl` | Code TTL (seconds) | `300` | Time-to-live for the OTP code |
 | `smsOtp.maxRetries` | Max Retries | `3` | Max failed attempts before invalidation |
 | `smsOtp.phoneAttribute` | Phone Number Attribute | `phoneNumber` | User attribute storing the phone number |
+| `smsOtp.sendCooldown` | Send Cooldown (seconds) | `60` | Minimum interval between resends per user. Resend button is disabled while this elapses. Set to `0` to disable throttling. Should be `< ttl`. |
+
+### Send Rate Limiting
+
+Both the browser-flow authenticators and the grant types throttle OTP sends per `(realm, user, channel)`, backed by Keycloak's `SingleUseObjectProvider` (cluster-safe).
+
+- **Browser flow:** the initial send when a user starts a fresh login always goes through. The **Resend code** button on the OTP form is disabled until `sendCooldown` elapses, then re-enables (a JS countdown drives the UI). Refreshing the OTP page does **not** trigger a new send — the existing valid code in the auth session is re-shown.
+- **Grant types** (`urn:otp:email` / `urn:otp:sms`): every phase-1 send is throttled. A request within the cooldown window returns:
+
+  ```
+  HTTP/1.1 429 Too Many Requests
+  Retry-After: 38
+
+  {"error":"otp_send_throttled","error_description":"Too many OTP send requests. Retry in 38 seconds.","retry_after":38}
+  ```
+
+  Configure via the realm attribute `otp.sendCooldown` (seconds, default `60`). Set in `realm-export.json`:
+
+  ```json
+  {
+    "attributes": {
+      "otp.sendCooldown": "60"
+    }
+  }
+  ```
 
 ## Setup: Browser Flow
 
@@ -237,6 +263,7 @@ browser-otp-choice-forms           (ALTERNATIVE)
 | `otpChoice.ttl` | Code TTL (seconds) | `300` | Time-to-live for the OTP code |
 | `otpChoice.maxRetries` | Max Retries | `3` | Max failed attempts before invalidation |
 | `otpChoice.phoneAttribute` | Phone Number Attribute | `phoneNumber` | User attribute storing the phone number |
+| `otpChoice.sendCooldown` | Send Cooldown (seconds) | `60` | Minimum interval between resends per user, per channel |
 
 ## Email Configuration
 

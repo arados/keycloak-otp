@@ -57,6 +57,7 @@ themes (no Java dependencies)
 
 **common** (`hr.delmisoft.keycloak.otp`) — shared infrastructure:
 - `EmailOtpConst` / `SmsOtpConst` — constants (provider IDs, config keys, defaults, auth note keys, error codes)
+- `OtpSendThrottle` — per-(realm, user, channel) send-cooldown helper, backed by `SingleUseObjectProvider.putIfAbsent` (cluster-safe)
 - Custom SMS SPI: `SmsProvider` / `SmsProviderFactory` / `SmsSpi` with `LogSmsSenderFactory` default
 - SPI registrations: `org.keycloak.provider.Spi`, `hr.delmisoft.keycloak.otp.sms.SmsProviderFactory`
 
@@ -84,7 +85,11 @@ themes (no Java dependencies)
 
 - OTP codes use constant-time comparison (`MessageDigest.isEqual`) to prevent timing attacks
 - Codes are generated with `SecureRandom`
-- All authenticators are configurable (code length, TTL, max retries) via Keycloak's authenticator config
+- All authenticators are configurable (code length, TTL, max retries, send cooldown) via Keycloak's authenticator config
+- Browser `authenticate()` is idempotent: refreshing the OTP page rehydrates the existing valid code instead of triggering a new send
+- **Send rate limiting** — `OtpSendThrottle` keyed by `(realmId, userId, channel)`:
+  - Browser flow: initial send for a fresh auth session always goes through; explicit **Resend** button and expired-code resends are gated by `sendCooldown` (default 60s)
+  - Grant types (`urn:otp:email`/`urn:otp:sms`): every phase-1 send is gated. Throttled requests return **HTTP 429** with `Retry-After` header and JSON body `{error:"otp_send_throttled", retry_after:N}`. Cooldown read from realm attribute `otp.sendCooldown` (default 60s).
 
 ### Testing
 

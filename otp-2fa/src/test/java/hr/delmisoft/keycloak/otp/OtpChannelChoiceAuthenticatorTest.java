@@ -20,6 +20,7 @@ import org.keycloak.http.HttpRequest;
 import org.keycloak.models.AuthenticatorConfigModel;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
+import org.keycloak.models.SingleUseObjectProvider;
 import org.keycloak.models.UserModel;
 import org.keycloak.sessions.AuthenticationSessionModel;
 import org.mockito.ArgumentCaptor;
@@ -36,6 +37,7 @@ import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
@@ -60,6 +62,7 @@ class OtpChannelChoiceAuthenticatorTest {
     @Mock private HttpRequest httpRequest;
     @Mock private AuthenticatorConfigModel authenticatorConfig;
     @Mock private Response formResponse;
+    @Mock private SingleUseObjectProvider singleUseStore;
 
     @BeforeEach
     void setUp() {
@@ -76,6 +79,10 @@ class OtpChannelChoiceAuthenticatorTest {
         when(emailProvider.setRealm(any())).thenReturn(emailProvider);
         when(emailProvider.setUser(any())).thenReturn(emailProvider);
         when(session.getProvider(SmsProvider.class)).thenReturn(smsProvider);
+        when(session.getProvider(SingleUseObjectProvider.class)).thenReturn(singleUseStore);
+        when(realm.getId()).thenReturn("realm-1");
+        when(user.getId()).thenReturn("user-1");
+        when(singleUseStore.putIfAbsent(anyString(), anyLong())).thenReturn(true);
         when(user.getFirstAttribute(SmsOtpConst.DEFAULT_PHONE_ATTRIBUTE)).thenReturn("+1234567890");
     }
 
@@ -84,6 +91,7 @@ class OtpChannelChoiceAuthenticatorTest {
     @Test
     void authenticate_showsChannelSelectionForm() {
         when(context.form()).thenReturn(form);
+        when(form.setAttribute(anyString(), any())).thenReturn(form);
         when(form.createForm(OtpChannelChoiceAuthenticator.TEMPLATE_CHANNEL_SELECT)).thenReturn(formResponse);
 
         authenticator.authenticate(context);
@@ -101,6 +109,7 @@ class OtpChannelChoiceAuthenticatorTest {
         when(context.getHttpRequest()).thenReturn(httpRequest);
         when(httpRequest.getDecodedFormParameters()).thenReturn(formParams);
         when(context.form()).thenReturn(form);
+        when(form.setAttribute(anyString(), any())).thenReturn(form);
         when(form.createForm(EmailOtpConst.LOGIN_TEMPLATE)).thenReturn(formResponse);
 
         authenticator.action(context);
@@ -121,6 +130,7 @@ class OtpChannelChoiceAuthenticatorTest {
         when(context.getHttpRequest()).thenReturn(httpRequest);
         when(httpRequest.getDecodedFormParameters()).thenReturn(formParams);
         when(context.form()).thenReturn(form);
+        when(form.setAttribute(anyString(), any())).thenReturn(form);
         when(form.createForm(SmsOtpConst.LOGIN_TEMPLATE)).thenReturn(formResponse);
 
         authenticator.action(context);
@@ -138,6 +148,7 @@ class OtpChannelChoiceAuthenticatorTest {
         when(httpRequest.getDecodedFormParameters()).thenReturn(formParams);
         when(context.getAuthenticationSession()).thenReturn(authSession);
         when(context.form()).thenReturn(form);
+        when(form.setAttribute(anyString(), any())).thenReturn(form);
         when(form.setError(anyString())).thenReturn(form);
         when(form.createForm(OtpChannelChoiceAuthenticator.TEMPLATE_CHANNEL_SELECT)).thenReturn(formResponse);
 
@@ -155,6 +166,7 @@ class OtpChannelChoiceAuthenticatorTest {
         when(context.getHttpRequest()).thenReturn(httpRequest);
         when(httpRequest.getDecodedFormParameters()).thenReturn(formParams);
         when(context.form()).thenReturn(form);
+        when(form.setAttribute(anyString(), any())).thenReturn(form);
         when(form.setError(anyString())).thenReturn(form);
         when(form.createErrorPage(any())).thenReturn(formResponse);
         doThrow(new EmailException("fail")).when(emailProvider).send(anyString(), anyString(), any());
@@ -172,6 +184,7 @@ class OtpChannelChoiceAuthenticatorTest {
         when(context.getHttpRequest()).thenReturn(httpRequest);
         when(httpRequest.getDecodedFormParameters()).thenReturn(formParams);
         when(context.form()).thenReturn(form);
+        when(form.setAttribute(anyString(), any())).thenReturn(form);
         when(form.setError(anyString())).thenReturn(form);
         when(form.createErrorPage(any())).thenReturn(formResponse);
         doThrow(new SmsException("fail")).when(smsProvider).send(anyString(), anyString());
@@ -190,6 +203,7 @@ class OtpChannelChoiceAuthenticatorTest {
         when(context.getHttpRequest()).thenReturn(httpRequest);
         when(httpRequest.getDecodedFormParameters()).thenReturn(formParams);
         when(context.form()).thenReturn(form);
+        when(form.setAttribute(anyString(), any())).thenReturn(form);
         when(form.setError(anyString())).thenReturn(form);
         when(form.createErrorPage(any())).thenReturn(formResponse);
 
@@ -249,6 +263,7 @@ class OtpChannelChoiceAuthenticatorTest {
         when(authSession.getAuthNote(OtpChannelChoiceAuthenticator.AUTH_NOTE_EXPIRY)).thenReturn(String.valueOf(Time.currentTime() + 300));
         when(authSession.getAuthNote(OtpChannelChoiceAuthenticator.AUTH_NOTE_ATTEMPTS)).thenReturn("0");
         when(context.form()).thenReturn(form);
+        when(form.setAttribute(anyString(), any())).thenReturn(form);
         when(form.setError(anyString())).thenReturn(form);
         when(form.createForm(anyString())).thenReturn(formResponse);
 
@@ -268,6 +283,7 @@ class OtpChannelChoiceAuthenticatorTest {
         when(context.getAuthenticationSession()).thenReturn(authSession);
         when(authSession.getAuthNote(OtpChannelChoiceAuthenticator.AUTH_NOTE_CHANNEL)).thenReturn("email");
         when(context.form()).thenReturn(form);
+        when(form.setAttribute(anyString(), any())).thenReturn(form);
         when(form.setError(anyString())).thenReturn(form);
         when(form.createForm(anyString())).thenReturn(formResponse);
 
@@ -289,6 +305,7 @@ class OtpChannelChoiceAuthenticatorTest {
         when(authSession.getAuthNote(OtpChannelChoiceAuthenticator.AUTH_NOTE_EXPIRY)).thenReturn(String.valueOf(Time.currentTime() - 10));
         when(authSession.getAuthNote(OtpChannelChoiceAuthenticator.AUTH_NOTE_ATTEMPTS)).thenReturn("0");
         when(context.form()).thenReturn(form);
+        when(form.setAttribute(anyString(), any())).thenReturn(form);
         when(form.setError(anyString())).thenReturn(form);
         when(form.createForm(anyString())).thenReturn(formResponse);
 
@@ -310,6 +327,7 @@ class OtpChannelChoiceAuthenticatorTest {
         when(authSession.getAuthNote(OtpChannelChoiceAuthenticator.AUTH_NOTE_EXPIRY)).thenReturn(String.valueOf(Time.currentTime() - 10));
         when(authSession.getAuthNote(OtpChannelChoiceAuthenticator.AUTH_NOTE_ATTEMPTS)).thenReturn("0");
         when(context.form()).thenReturn(form);
+        when(form.setAttribute(anyString(), any())).thenReturn(form);
         when(form.setError(anyString())).thenReturn(form);
         when(form.createForm(anyString())).thenReturn(formResponse);
 
@@ -332,6 +350,7 @@ class OtpChannelChoiceAuthenticatorTest {
         when(authSession.getAuthNote(OtpChannelChoiceAuthenticator.AUTH_NOTE_EXPIRY)).thenReturn(String.valueOf(Time.currentTime() + 300));
         when(authSession.getAuthNote(OtpChannelChoiceAuthenticator.AUTH_NOTE_ATTEMPTS)).thenReturn("3");
         when(context.form()).thenReturn(form);
+        when(form.setAttribute(anyString(), any())).thenReturn(form);
         when(form.setError(anyString())).thenReturn(form);
         when(form.createForm(anyString())).thenReturn(formResponse);
 
@@ -351,6 +370,7 @@ class OtpChannelChoiceAuthenticatorTest {
         when(authSession.getAuthNote(OtpChannelChoiceAuthenticator.AUTH_NOTE_CHANNEL)).thenReturn("email");
         when(authSession.getAuthNote(OtpChannelChoiceAuthenticator.AUTH_NOTE_CODE)).thenReturn(null);
         when(context.form()).thenReturn(form);
+        when(form.setAttribute(anyString(), any())).thenReturn(form);
         when(form.createForm(OtpChannelChoiceAuthenticator.TEMPLATE_CHANNEL_SELECT)).thenReturn(formResponse);
 
         authenticator.action(context);
@@ -370,6 +390,7 @@ class OtpChannelChoiceAuthenticatorTest {
         when(context.getHttpRequest()).thenReturn(httpRequest);
         when(httpRequest.getDecodedFormParameters()).thenReturn(formParams);
         when(context.form()).thenReturn(form);
+        when(form.setAttribute(anyString(), any())).thenReturn(form);
         when(form.createForm(SmsOtpConst.LOGIN_TEMPLATE)).thenReturn(formResponse);
         // Existing channel note from previous selection
         when(authSession.getAuthNote(OtpChannelChoiceAuthenticator.AUTH_NOTE_CHANNEL)).thenReturn("email");
@@ -397,6 +418,7 @@ class OtpChannelChoiceAuthenticatorTest {
         when(context.getHttpRequest()).thenReturn(httpRequest);
         when(httpRequest.getDecodedFormParameters()).thenReturn(formParams);
         when(context.form()).thenReturn(form);
+        when(form.setAttribute(anyString(), any())).thenReturn(form);
         when(form.createForm(EmailOtpConst.LOGIN_TEMPLATE)).thenReturn(formResponse);
         // Existing channel note from previous selection
         when(authSession.getAuthNote(OtpChannelChoiceAuthenticator.AUTH_NOTE_CHANNEL)).thenReturn("email");
@@ -422,6 +444,7 @@ class OtpChannelChoiceAuthenticatorTest {
         when(context.getAuthenticationSession()).thenReturn(authSession);
         when(authSession.getAuthNote(OtpChannelChoiceAuthenticator.AUTH_NOTE_CHANNEL)).thenReturn(null);
         when(context.form()).thenReturn(form);
+        when(form.setAttribute(anyString(), any())).thenReturn(form);
         when(form.createForm(OtpChannelChoiceAuthenticator.TEMPLATE_CHANNEL_SELECT)).thenReturn(formResponse);
 
         authenticator.action(context);
@@ -430,6 +453,68 @@ class OtpChannelChoiceAuthenticatorTest {
     }
 
     // --- Custom config ---
+
+    // --- Throttle / resend ---
+
+    @Test
+    void action_selectEmailBypassesThrottleEvenIfActive() throws Exception {
+        // Initial channel selection always sends — throttle only applies to resend.
+        setupCommonMocks();
+        when(singleUseStore.putIfAbsent(anyString(), anyLong())).thenReturn(false);
+        MultivaluedMap<String, String> formParams = new MultivaluedHashMap<>();
+        formParams.putSingle(OtpChannelChoiceAuthenticator.PARAM_CHANNEL, "email");
+        when(context.getHttpRequest()).thenReturn(httpRequest);
+        when(httpRequest.getDecodedFormParameters()).thenReturn(formParams);
+        when(context.form()).thenReturn(form);
+        when(form.setAttribute(anyString(), any())).thenReturn(form);
+        when(form.createForm(EmailOtpConst.LOGIN_TEMPLATE)).thenReturn(formResponse);
+
+        authenticator.action(context);
+
+        verify(emailProvider).send(eq(EmailOtpConst.EMAIL_SUBJECT_KEY), eq(EmailOtpConst.EMAIL_TEMPLATE), any());
+        verify(authSession).setAuthNote(eq(OtpChannelChoiceAuthenticator.AUTH_NOTE_CODE), anyString());
+        verify(context).challenge(formResponse);
+    }
+
+    @Test
+    void action_resendParamWhenAllowed_resendsViaSelectedChannel() throws Exception {
+        setupCommonMocks();
+        MultivaluedMap<String, String> formParams = new MultivaluedHashMap<>();
+        formParams.putSingle(OtpChannelChoiceAuthenticator.PARAM_RESEND, "true");
+        when(context.getHttpRequest()).thenReturn(httpRequest);
+        when(httpRequest.getDecodedFormParameters()).thenReturn(formParams);
+        when(authSession.getAuthNote(OtpChannelChoiceAuthenticator.AUTH_NOTE_CHANNEL))
+                .thenReturn(OtpChannelChoiceAuthenticator.CHANNEL_SMS);
+        when(context.form()).thenReturn(form);
+        when(form.setAttribute(anyString(), any())).thenReturn(form);
+        when(form.createForm(SmsOtpConst.LOGIN_TEMPLATE)).thenReturn(formResponse);
+
+        authenticator.action(context);
+
+        verify(smsProvider).send(eq("+1234567890"), anyString());
+        verify(authSession).setAuthNote(eq(OtpChannelChoiceAuthenticator.AUTH_NOTE_CODE), anyString());
+        verify(context).challenge(formResponse);
+    }
+
+    @Test
+    void action_resendParamWhenThrottled_doesNotSend() throws Exception {
+        setupCommonMocks();
+        when(singleUseStore.putIfAbsent(anyString(), anyLong())).thenReturn(false);
+        MultivaluedMap<String, String> formParams = new MultivaluedHashMap<>();
+        formParams.putSingle(OtpChannelChoiceAuthenticator.PARAM_RESEND, "true");
+        when(context.getHttpRequest()).thenReturn(httpRequest);
+        when(httpRequest.getDecodedFormParameters()).thenReturn(formParams);
+        when(authSession.getAuthNote(OtpChannelChoiceAuthenticator.AUTH_NOTE_CHANNEL))
+                .thenReturn(OtpChannelChoiceAuthenticator.CHANNEL_EMAIL);
+        when(context.form()).thenReturn(form);
+        when(form.setAttribute(anyString(), any())).thenReturn(form);
+        when(form.createForm(EmailOtpConst.LOGIN_TEMPLATE)).thenReturn(formResponse);
+
+        authenticator.action(context);
+
+        verify(emailProvider, never()).send(anyString(), anyString(), any());
+        verify(context).challenge(formResponse);
+    }
 
     @Test
     void action_selectEmailWithCustomConfig_usesConfiguredCodeLength() throws Exception {
@@ -444,6 +529,7 @@ class OtpChannelChoiceAuthenticatorTest {
         when(context.getHttpRequest()).thenReturn(httpRequest);
         when(httpRequest.getDecodedFormParameters()).thenReturn(formParams);
         when(context.form()).thenReturn(form);
+        when(form.setAttribute(anyString(), any())).thenReturn(form);
         when(form.createForm(EmailOtpConst.LOGIN_TEMPLATE)).thenReturn(formResponse);
 
         authenticator.action(context);

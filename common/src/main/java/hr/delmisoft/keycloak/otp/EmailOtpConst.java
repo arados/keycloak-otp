@@ -12,16 +12,19 @@ public final class EmailOtpConst {
     public static final String CONFIG_CODE_LENGTH = "emailOtp.codeLength";
     public static final String CONFIG_TTL = "emailOtp.ttl";
     public static final String CONFIG_MAX_RETRIES = "emailOtp.maxRetries";
+    public static final String CONFIG_SEND_COOLDOWN = "emailOtp.sendCooldown";
 
     // Defaults
     public static final int DEFAULT_CODE_LENGTH = 6;
     public static final int DEFAULT_TTL = 300;
     public static final int DEFAULT_MAX_RETRIES = 3;
+    public static final int DEFAULT_SEND_COOLDOWN = 60;
 
     // Auth session note keys (browser flow)
     public static final String AUTH_NOTE_CODE = "emailOtpCode";
     public static final String AUTH_NOTE_EXPIRY = "emailOtpExpiry";
     public static final String AUTH_NOTE_ATTEMPTS = "emailOtpAttempts";
+    public static final String AUTH_NOTE_LAST_SENT = "emailOtpLastSent";
 
     // SingleUseObject note keys (direct grant)
     public static final String NOTE_CODE = "code";
@@ -31,6 +34,7 @@ public final class EmailOtpConst {
     // Form / request param names
     public static final String PARAM_OTP = "otp";
     public static final String PARAM_OTP_SESSION_ID = "otp_session_id";
+    public static final String PARAM_RESEND = "resend";
 
     // Error codes
     public static final String ERROR_EMAIL_OTP_REQUIRED = "email_otp_required";
@@ -38,6 +42,7 @@ public final class EmailOtpConst {
     public static final String ERROR_OTP_EXPIRED = "emailOtpExpired";
     public static final String ERROR_OTP_MAX_RETRIES = "emailOtpMaxRetries";
     public static final String ERROR_SESSION_EXPIRED = "emailOtpSessionExpired";
+    public static final String ERROR_OTP_SEND_THROTTLED = "otp_send_throttled";
 
     // Email template
     public static final String EMAIL_TEMPLATE = "email-otp-code.ftl";

@@ -20,6 +20,7 @@ import org.keycloak.http.HttpRequest;
 import org.keycloak.models.AuthenticatorConfigModel;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
+import org.keycloak.models.SingleUseObjectProvider;
 import org.keycloak.models.UserModel;
 import org.keycloak.sessions.AuthenticationSessionModel;
 import org.mockito.ArgumentCaptor;
@@ -32,6 +33,7 @@ import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
@@ -55,6 +57,7 @@ class EmailOtpAuthenticatorTest {
     @Mock private HttpRequest httpRequest;
     @Mock private AuthenticatorConfigModel authenticatorConfig;
     @Mock private Response formResponse;
+    @Mock private SingleUseObjectProvider singleUseStore;
 
     @BeforeEach
     void setUp() {
@@ -68,6 +71,10 @@ class EmailOtpAuthenticatorTest {
         when(context.getAuthenticationSession()).thenReturn(authSession);
         when(context.getAuthenticatorConfig()).thenReturn(null);
         when(session.getProvider(EmailTemplateProvider.class)).thenReturn(emailProvider);
+        when(session.getProvider(SingleUseObjectProvider.class)).thenReturn(singleUseStore);
+        when(realm.getId()).thenReturn("realm-1");
+        when(user.getId()).thenReturn("user-1");
+        when(singleUseStore.putIfAbsent(anyString(), anyLong())).thenReturn(true);
         when(emailProvider.setRealm(any())).thenReturn(emailProvider);
         when(emailProvider.setUser(any())).thenReturn(emailProvider);
     }
@@ -76,6 +83,7 @@ class EmailOtpAuthenticatorTest {
     void authenticate_sendsEmailAndChallenge() throws Exception {
         setupCommonMocks();
         when(context.form()).thenReturn(form);
+        when(form.setAttribute(anyString(), any())).thenReturn(form);
         when(form.createForm(EmailOtpConst.LOGIN_TEMPLATE)).thenReturn(formResponse);
 
         authenticator.authenticate(context);
@@ -96,6 +104,7 @@ class EmailOtpAuthenticatorTest {
     void authenticate_emailFailure_returnsError() throws Exception {
         setupCommonMocks();
         when(context.form()).thenReturn(form);
+        when(form.setAttribute(anyString(), any())).thenReturn(form);
         when(form.setError(anyString())).thenReturn(form);
         when(form.createErrorPage(any())).thenReturn(formResponse);
         doThrow(new EmailException("fail")).when(emailProvider).send(anyString(), anyString(), any());
@@ -137,6 +146,7 @@ class EmailOtpAuthenticatorTest {
         when(authSession.getAuthNote(EmailOtpConst.AUTH_NOTE_EXPIRY)).thenReturn(String.valueOf(Time.currentTime() + 300));
         when(authSession.getAuthNote(EmailOtpConst.AUTH_NOTE_ATTEMPTS)).thenReturn("0");
         when(context.form()).thenReturn(form);
+        when(form.setAttribute(anyString(), any())).thenReturn(form);
         when(form.setError(anyString())).thenReturn(form);
         when(form.createForm(anyString())).thenReturn(formResponse);
 
@@ -155,6 +165,7 @@ class EmailOtpAuthenticatorTest {
         when(context.getHttpRequest()).thenReturn(httpRequest);
         when(httpRequest.getDecodedFormParameters()).thenReturn(formParams);
         when(context.form()).thenReturn(form);
+        when(form.setAttribute(anyString(), any())).thenReturn(form);
         when(form.setError(anyString())).thenReturn(form);
         when(form.createForm(anyString())).thenReturn(formResponse);
 
@@ -176,6 +187,7 @@ class EmailOtpAuthenticatorTest {
         when(authSession.getAuthNote(EmailOtpConst.AUTH_NOTE_EXPIRY)).thenReturn(String.valueOf(Time.currentTime() - 10));
         when(authSession.getAuthNote(EmailOtpConst.AUTH_NOTE_ATTEMPTS)).thenReturn("0");
         when(context.form()).thenReturn(form);
+        when(form.setAttribute(anyString(), any())).thenReturn(form);
         when(form.setError(anyString())).thenReturn(form);
         when(form.createForm(anyString())).thenReturn(formResponse);
 
@@ -202,6 +214,7 @@ class EmailOtpAuthenticatorTest {
         when(authSession.getAuthNote(EmailOtpConst.AUTH_NOTE_EXPIRY)).thenReturn(String.valueOf(Time.currentTime() + 300));
         when(authSession.getAuthNote(EmailOtpConst.AUTH_NOTE_ATTEMPTS)).thenReturn("3");
         when(context.form()).thenReturn(form);
+        when(form.setAttribute(anyString(), any())).thenReturn(form);
         when(form.setError(anyString())).thenReturn(form);
         when(form.createForm(anyString())).thenReturn(formResponse);
 
@@ -220,6 +233,7 @@ class EmailOtpAuthenticatorTest {
         when(authenticatorConfig.getConfig()).thenReturn(config);
         when(context.getAuthenticatorConfig()).thenReturn(authenticatorConfig);
         when(context.form()).thenReturn(form);
+        when(form.setAttribute(anyString(), any())).thenReturn(form);
         when(form.createForm(EmailOtpConst.LOGIN_TEMPLATE)).thenReturn(formResponse);
 
         authenticator.authenticate(context);
@@ -227,6 +241,84 @@ class EmailOtpAuthenticatorTest {
         ArgumentCaptor<String> codeCaptor = ArgumentCaptor.forClass(String.class);
         verify(authSession).setAuthNote(eq(EmailOtpConst.AUTH_NOTE_CODE), codeCaptor.capture());
         assertThat(codeCaptor.getValue().length(), equalTo(8));
+    }
+
+    @Test
+    void authenticate_refreshWithExistingValidCode_doesNotResend() throws Exception {
+        setupCommonMocks();
+        when(context.form()).thenReturn(form);
+        when(form.setAttribute(anyString(), any())).thenReturn(form);
+        when(form.createForm(EmailOtpConst.LOGIN_TEMPLATE)).thenReturn(formResponse);
+        when(authSession.getAuthNote(EmailOtpConst.AUTH_NOTE_CODE)).thenReturn("123456");
+        when(authSession.getAuthNote(EmailOtpConst.AUTH_NOTE_EXPIRY)).thenReturn(String.valueOf(Time.currentTime() + 200));
+
+        authenticator.authenticate(context);
+
+        // Email must NOT be re-sent on refresh
+        verify(emailProvider, never()).send(anyString(), anyString(), any());
+        // Throttle slot must NOT be touched
+        verify(singleUseStore, never()).putIfAbsent(anyString(), anyLong());
+        // Form is still shown
+        verify(context).challenge(formResponse);
+    }
+
+    @Test
+    void authenticate_freshSessionBypassesThrottleEvenIfActive() throws Exception {
+        // Initial send for a brand-new auth session must always succeed (UX over strict invariant).
+        // Throttle still applies to explicit resend and to grant-type endpoint.
+        setupCommonMocks();
+        when(singleUseStore.putIfAbsent(anyString(), anyLong())).thenReturn(false);
+        when(context.form()).thenReturn(form);
+        when(form.setAttribute(anyString(), any())).thenReturn(form);
+        when(form.createForm(EmailOtpConst.LOGIN_TEMPLATE)).thenReturn(formResponse);
+
+        authenticator.authenticate(context);
+
+        // Email IS sent and code IS stored, despite the throttle being engaged.
+        verify(emailProvider).send(eq(EmailOtpConst.EMAIL_SUBJECT_KEY), eq(EmailOtpConst.EMAIL_TEMPLATE), any());
+        verify(authSession).setAuthNote(eq(EmailOtpConst.AUTH_NOTE_CODE), anyString());
+        verify(context).challenge(formResponse);
+    }
+
+    @Test
+    void action_resendParamWhenAllowed_generatesAndSendsNewCode() throws Exception {
+        MultivaluedMap<String, String> formParams = new MultivaluedHashMap<>();
+        formParams.putSingle(EmailOtpConst.PARAM_RESEND, "true");
+
+        setupCommonMocks();
+        when(context.getHttpRequest()).thenReturn(httpRequest);
+        when(httpRequest.getDecodedFormParameters()).thenReturn(formParams);
+        when(context.form()).thenReturn(form);
+        when(form.setAttribute(anyString(), any())).thenReturn(form);
+        when(form.createForm(EmailOtpConst.LOGIN_TEMPLATE)).thenReturn(formResponse);
+
+        authenticator.action(context);
+
+        ArgumentCaptor<String> codeCaptor = ArgumentCaptor.forClass(String.class);
+        verify(authSession).setAuthNote(eq(EmailOtpConst.AUTH_NOTE_CODE), codeCaptor.capture());
+        verify(emailProvider).send(eq(EmailOtpConst.EMAIL_SUBJECT_KEY), eq(EmailOtpConst.EMAIL_TEMPLATE), any());
+        verify(context).challenge(formResponse);
+        assertThat(codeCaptor.getValue().length(), equalTo(6));
+    }
+
+    @Test
+    void action_resendParamWhenThrottled_doesNotSend() throws Exception {
+        MultivaluedMap<String, String> formParams = new MultivaluedHashMap<>();
+        formParams.putSingle(EmailOtpConst.PARAM_RESEND, "true");
+
+        setupCommonMocks();
+        when(singleUseStore.putIfAbsent(anyString(), anyLong())).thenReturn(false);
+        when(context.getHttpRequest()).thenReturn(httpRequest);
+        when(httpRequest.getDecodedFormParameters()).thenReturn(formParams);
+        when(context.form()).thenReturn(form);
+        when(form.setAttribute(anyString(), any())).thenReturn(form);
+        when(form.createForm(EmailOtpConst.LOGIN_TEMPLATE)).thenReturn(formResponse);
+
+        authenticator.action(context);
+
+        verify(emailProvider, never()).send(anyString(), anyString(), any());
+        verify(authSession, never()).setAuthNote(eq(EmailOtpConst.AUTH_NOTE_CODE), anyString());
+        verify(context).challenge(formResponse);
     }
 
     @Test

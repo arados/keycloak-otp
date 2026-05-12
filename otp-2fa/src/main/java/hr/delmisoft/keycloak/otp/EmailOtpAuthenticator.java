@@ -24,25 +24,36 @@ public class EmailOtpAuthenticator implements Authenticator {
 
     @Override
     public void authenticate(AuthenticationFlowContext context) {
-        int codeLength = getConfigInt(context, EmailOtpConst.CONFIG_CODE_LENGTH, EmailOtpConst.DEFAULT_CODE_LENGTH);
-        int ttl = getConfigInt(context, EmailOtpConst.CONFIG_TTL, EmailOtpConst.DEFAULT_TTL);
-
-        String code = generateCode(codeLength);
-
         AuthenticationSessionModel authSession = context.getAuthenticationSession();
-        authSession.setAuthNote(EmailOtpConst.AUTH_NOTE_CODE, code);
-        authSession.setAuthNote(EmailOtpConst.AUTH_NOTE_EXPIRY, String.valueOf(Time.currentTime() + ttl));
-        authSession.setAuthNote(EmailOtpConst.AUTH_NOTE_ATTEMPTS, "0");
+        String existingCode = authSession.getAuthNote(EmailOtpConst.AUTH_NOTE_CODE);
+        String expiryStr = authSession.getAuthNote(EmailOtpConst.AUTH_NOTE_EXPIRY);
 
-        if (!sendEmail(context, code)) {
-            return;
+        // Refresh / re-entry: if a valid code already exists in this auth session,
+        // re-render the form without sending again.
+        if (existingCode != null && expiryStr != null) {
+            try {
+                if (Time.currentTime() < Integer.parseInt(expiryStr)) {
+                    challengeOtpForm(context);
+                    return;
+                }
+            } catch (NumberFormatException ignored) {
+                // fall through and try a fresh send
+            }
         }
 
-        context.challenge(context.form().createForm(EmailOtpConst.LOGIN_TEMPLATE));
+        // First send for this auth session — bypass throttle so a legitimate fresh login
+        // is never blocked. Resend button and grant-type endpoint remain throttled.
+        sendCode(context, /* honourThrottle= */ false);
     }
 
     @Override
     public void action(AuthenticationFlowContext context) {
+        String resendParam = context.getHttpRequest().getDecodedFormParameters().getFirst(EmailOtpConst.PARAM_RESEND);
+        if ("true".equalsIgnoreCase(resendParam)) {
+            sendCode(context, /* honourThrottle= */ true);
+            return;
+        }
+
         String enteredOtp = context.getHttpRequest().getDecodedFormParameters().getFirst(EmailOtpConst.PARAM_OTP);
         if (enteredOtp == null || enteredOtp.isBlank()) {
             context.failureChallenge(AuthenticationFlowError.INVALID_CREDENTIALS,
@@ -56,8 +67,8 @@ public class EmailOtpAuthenticator implements Authenticator {
         String attemptsStr = authSession.getAuthNote(EmailOtpConst.AUTH_NOTE_ATTEMPTS);
 
         if (storedCode == null || expiryStr == null || attemptsStr == null) {
-            // Session state is missing or corrupted — restart OTP flow
-            authenticate(context);
+            // Session state is missing or corrupted — recover by sending unconditionally
+            sendCode(context, /* honourThrottle= */ false);
             return;
         }
 
@@ -65,17 +76,9 @@ public class EmailOtpAuthenticator implements Authenticator {
         int attempts = Integer.parseInt(attemptsStr);
         int maxRetries = getConfigInt(context, EmailOtpConst.CONFIG_MAX_RETRIES, EmailOtpConst.DEFAULT_MAX_RETRIES);
 
-        // Check expiry — resend a new code if expired
+        // Check expiry — resend a new code if expired (subject to throttle)
         if (Time.currentTime() > expiry) {
-            int codeLength = getConfigInt(context, EmailOtpConst.CONFIG_CODE_LENGTH, EmailOtpConst.DEFAULT_CODE_LENGTH);
-            int ttl = getConfigInt(context, EmailOtpConst.CONFIG_TTL, EmailOtpConst.DEFAULT_TTL);
-            String newCode = generateCode(codeLength);
-            authSession.setAuthNote(EmailOtpConst.AUTH_NOTE_CODE, newCode);
-            authSession.setAuthNote(EmailOtpConst.AUTH_NOTE_EXPIRY, String.valueOf(Time.currentTime() + ttl));
-            authSession.setAuthNote(EmailOtpConst.AUTH_NOTE_ATTEMPTS, "0");
-            sendEmail(context, newCode);
-            context.failureChallenge(AuthenticationFlowError.EXPIRED_CODE,
-                    context.form().setError(EmailOtpConst.ERROR_OTP_EXPIRED).createForm(EmailOtpConst.LOGIN_TEMPLATE));
+            sendNewCodeOnExpiry(context);
             return;
         }
 
@@ -114,6 +117,71 @@ public class EmailOtpAuthenticator implements Authenticator {
     @Override
     public void close() {
         // no-op
+    }
+
+    private void sendCode(AuthenticationFlowContext context, boolean honourThrottle) {
+        int cooldown = getConfigInt(context, EmailOtpConst.CONFIG_SEND_COOLDOWN, EmailOtpConst.DEFAULT_SEND_COOLDOWN);
+        if (honourThrottle && !OtpSendThrottle.tryReserve(context.getSession(), context.getRealm(), context.getUser(),
+                OtpSendThrottle.CHANNEL_EMAIL, cooldown)) {
+            // Resend within cooldown — silently re-render the form with the existing code.
+            challengeOtpForm(context);
+            return;
+        }
+        // Always update the throttle when actually sending so subsequent resends are gated.
+        if (!honourThrottle) {
+            OtpSendThrottle.tryReserve(context.getSession(), context.getRealm(), context.getUser(),
+                    OtpSendThrottle.CHANNEL_EMAIL, cooldown);
+        }
+
+        int codeLength = getConfigInt(context, EmailOtpConst.CONFIG_CODE_LENGTH, EmailOtpConst.DEFAULT_CODE_LENGTH);
+        int ttl = getConfigInt(context, EmailOtpConst.CONFIG_TTL, EmailOtpConst.DEFAULT_TTL);
+        String code = generateCode(codeLength);
+
+        AuthenticationSessionModel authSession = context.getAuthenticationSession();
+        authSession.setAuthNote(EmailOtpConst.AUTH_NOTE_CODE, code);
+        authSession.setAuthNote(EmailOtpConst.AUTH_NOTE_EXPIRY, String.valueOf(Time.currentTime() + ttl));
+        authSession.setAuthNote(EmailOtpConst.AUTH_NOTE_ATTEMPTS, "0");
+        authSession.setAuthNote(EmailOtpConst.AUTH_NOTE_LAST_SENT, String.valueOf(Time.currentTime()));
+
+        if (!sendEmail(context, code)) {
+            return;
+        }
+
+        challengeOtpForm(context);
+    }
+
+    private void sendNewCodeOnExpiry(AuthenticationFlowContext context) {
+        // Code expired in this session — treat like an automatic resend (subject to throttle).
+        int cooldown = getConfigInt(context, EmailOtpConst.CONFIG_SEND_COOLDOWN, EmailOtpConst.DEFAULT_SEND_COOLDOWN);
+        boolean reserved = OtpSendThrottle.tryReserve(context.getSession(), context.getRealm(), context.getUser(),
+                OtpSendThrottle.CHANNEL_EMAIL, cooldown);
+        if (reserved) {
+            int codeLength = getConfigInt(context, EmailOtpConst.CONFIG_CODE_LENGTH, EmailOtpConst.DEFAULT_CODE_LENGTH);
+            int ttl = getConfigInt(context, EmailOtpConst.CONFIG_TTL, EmailOtpConst.DEFAULT_TTL);
+            String newCode = generateCode(codeLength);
+            AuthenticationSessionModel authSession = context.getAuthenticationSession();
+            authSession.setAuthNote(EmailOtpConst.AUTH_NOTE_CODE, newCode);
+            authSession.setAuthNote(EmailOtpConst.AUTH_NOTE_EXPIRY, String.valueOf(Time.currentTime() + ttl));
+            authSession.setAuthNote(EmailOtpConst.AUTH_NOTE_ATTEMPTS, "0");
+            authSession.setAuthNote(EmailOtpConst.AUTH_NOTE_LAST_SENT, String.valueOf(Time.currentTime()));
+            sendEmail(context, newCode);
+        }
+        context.failureChallenge(AuthenticationFlowError.EXPIRED_CODE,
+                context.form()
+                        .setAttribute("resendAvailableInSeconds", resendAvailableInSeconds(context))
+                        .setError(EmailOtpConst.ERROR_OTP_EXPIRED)
+                        .createForm(EmailOtpConst.LOGIN_TEMPLATE));
+    }
+
+    private void challengeOtpForm(AuthenticationFlowContext context) {
+        context.challenge(context.form()
+                .setAttribute("resendAvailableInSeconds", resendAvailableInSeconds(context))
+                .createForm(EmailOtpConst.LOGIN_TEMPLATE));
+    }
+
+    private int resendAvailableInSeconds(AuthenticationFlowContext context) {
+        return OtpSendThrottle.remainingSeconds(context.getSession(), context.getRealm(),
+                context.getUser(), OtpSendThrottle.CHANNEL_EMAIL);
     }
 
     private boolean sendEmail(AuthenticationFlowContext context, String code) {

@@ -40,9 +40,11 @@ public class OtpChannelChoiceAuthenticator implements Authenticator {
     static final String AUTH_NOTE_CODE = "otpChoiceCode";
     static final String AUTH_NOTE_EXPIRY = "otpChoiceExpiry";
     static final String AUTH_NOTE_ATTEMPTS = "otpChoiceAttempts";
+    static final String AUTH_NOTE_LAST_SENT = "otpChoiceLastSent";
 
     static final String PARAM_CHANNEL = "channel";
     static final String PARAM_OTP = "otp";
+    static final String PARAM_RESEND = "resend";
 
     static final String CHANNEL_EMAIL = "email";
     static final String CHANNEL_SMS = "sms";
@@ -58,18 +60,18 @@ public class OtpChannelChoiceAuthenticator implements Authenticator {
     @Override
     public void action(AuthenticationFlowContext context) {
         String channelParam = context.getHttpRequest().getDecodedFormParameters().getFirst(PARAM_CHANNEL);
+        String resendParam = context.getHttpRequest().getDecodedFormParameters().getFirst(PARAM_RESEND);
 
         if (channelParam != null) {
-            // User is selecting (or re-selecting) a channel — handles browser back + resubmit
             handleChannelSelection(context);
+        } else if ("true".equalsIgnoreCase(resendParam)) {
+            handleResend(context);
         } else {
             AuthenticationSessionModel authSession = context.getAuthenticationSession();
             String selectedChannel = authSession.getAuthNote(AUTH_NOTE_CHANNEL);
             if (selectedChannel == null) {
-                // No channel in session and no channel param — restart selection
                 authenticate(context);
             } else {
-                // Phase 2: user is submitting an OTP code
                 handleOtpVerification(context, selectedChannel);
             }
         }
@@ -82,33 +84,65 @@ public class OtpChannelChoiceAuthenticator implements Authenticator {
             return;
         }
 
-        int codeLength = getConfigInt(context, OtpChannelChoiceConst.CONFIG_CODE_LENGTH, OtpChannelChoiceConst.DEFAULT_CODE_LENGTH);
-        int ttl = getConfigInt(context, OtpChannelChoiceConst.CONFIG_TTL, OtpChannelChoiceConst.DEFAULT_TTL);
-        String code = generateCode(codeLength);
-
-        // Clear any previous OTP state (handles browser back + re-selection)
         AuthenticationSessionModel authSession = context.getAuthenticationSession();
         authSession.removeAuthNote(AUTH_NOTE_CODE);
         authSession.removeAuthNote(AUTH_NOTE_EXPIRY);
         authSession.removeAuthNote(AUTH_NOTE_ATTEMPTS);
+        authSession.removeAuthNote(AUTH_NOTE_LAST_SENT);
         authSession.setAuthNote(AUTH_NOTE_CHANNEL, channel);
-        authSession.setAuthNote(AUTH_NOTE_CODE, code);
-        authSession.setAuthNote(AUTH_NOTE_EXPIRY, String.valueOf(Time.currentTime() + ttl));
-        authSession.setAuthNote(AUTH_NOTE_ATTEMPTS, "0");
 
-        boolean sent;
-        String template;
-        if (CHANNEL_EMAIL.equals(channel)) {
-            sent = sendEmail(context, code);
-            template = EmailOtpConst.LOGIN_TEMPLATE;
+        // First send for this auth session — bypass throttle to allow legitimate login.
+        sendCodeAndChallenge(context, channel, /* honourThrottle= */ false);
+    }
+
+    private void handleResend(AuthenticationFlowContext context) {
+        AuthenticationSessionModel authSession = context.getAuthenticationSession();
+        String channel = authSession.getAuthNote(AUTH_NOTE_CHANNEL);
+        if (channel == null) {
+            authenticate(context);
+            return;
+        }
+        sendCodeAndChallenge(context, channel, /* honourThrottle= */ true);
+    }
+
+    private void sendCodeAndChallenge(AuthenticationFlowContext context, String channel, boolean honourThrottle) {
+        String throttleChannel = CHANNEL_EMAIL.equals(channel) ? OtpSendThrottle.CHANNEL_EMAIL : OtpSendThrottle.CHANNEL_SMS;
+        String template = CHANNEL_EMAIL.equals(channel) ? EmailOtpConst.LOGIN_TEMPLATE : SmsOtpConst.LOGIN_TEMPLATE;
+
+        int cooldown = getConfigInt(context, OtpChannelChoiceConst.CONFIG_SEND_COOLDOWN, OtpChannelChoiceConst.DEFAULT_SEND_COOLDOWN);
+        boolean canSend;
+        if (honourThrottle) {
+            canSend = OtpSendThrottle.tryReserve(context.getSession(), context.getRealm(), context.getUser(),
+                    throttleChannel, cooldown);
         } else {
-            sent = sendSms(context, code);
-            template = SmsOtpConst.LOGIN_TEMPLATE;
+            // Send anyway, but update the throttle so subsequent resends are gated.
+            OtpSendThrottle.tryReserve(context.getSession(), context.getRealm(), context.getUser(),
+                    throttleChannel, cooldown);
+            canSend = true;
         }
 
-        if (sent) {
-            context.challenge(context.form().createForm(template));
+        if (canSend) {
+            int codeLength = getConfigInt(context, OtpChannelChoiceConst.CONFIG_CODE_LENGTH, OtpChannelChoiceConst.DEFAULT_CODE_LENGTH);
+            int ttl = getConfigInt(context, OtpChannelChoiceConst.CONFIG_TTL, OtpChannelChoiceConst.DEFAULT_TTL);
+            String code = generateCode(codeLength);
+
+            AuthenticationSessionModel authSession = context.getAuthenticationSession();
+            authSession.setAuthNote(AUTH_NOTE_CODE, code);
+            authSession.setAuthNote(AUTH_NOTE_EXPIRY, String.valueOf(Time.currentTime() + ttl));
+            authSession.setAuthNote(AUTH_NOTE_ATTEMPTS, "0");
+            authSession.setAuthNote(AUTH_NOTE_LAST_SENT, String.valueOf(Time.currentTime()));
+
+            boolean sent = CHANNEL_EMAIL.equals(channel) ? sendEmail(context, code) : sendSms(context, code);
+            if (!sent) {
+                return;
+            }
         }
+
+        int remaining = OtpSendThrottle.remainingSeconds(context.getSession(), context.getRealm(),
+                context.getUser(), throttleChannel);
+        context.challenge(context.form()
+                .setAttribute("resendAvailableInSeconds", remaining)
+                .createForm(template));
     }
 
     private void handleOtpVerification(AuthenticationFlowContext context, String channel) {
@@ -117,6 +151,7 @@ public class OtpChannelChoiceAuthenticator implements Authenticator {
         String errorInvalid = CHANNEL_EMAIL.equals(channel) ? EmailOtpConst.ERROR_OTP_INVALID : SmsOtpConst.ERROR_OTP_INVALID;
         String errorExpired = CHANNEL_EMAIL.equals(channel) ? EmailOtpConst.ERROR_OTP_EXPIRED : SmsOtpConst.ERROR_OTP_EXPIRED;
         String errorMaxRetries = CHANNEL_EMAIL.equals(channel) ? EmailOtpConst.ERROR_OTP_MAX_RETRIES : SmsOtpConst.ERROR_OTP_MAX_RETRIES;
+        String throttleChannel = CHANNEL_EMAIL.equals(channel) ? OtpSendThrottle.CHANNEL_EMAIL : OtpSendThrottle.CHANNEL_SMS;
 
         if (enteredOtp == null || enteredOtp.isBlank()) {
             context.failureChallenge(AuthenticationFlowError.INVALID_CREDENTIALS,
@@ -130,7 +165,6 @@ public class OtpChannelChoiceAuthenticator implements Authenticator {
         String attemptsStr = authSession.getAuthNote(AUTH_NOTE_ATTEMPTS);
 
         if (storedCode == null || expiryStr == null || attemptsStr == null) {
-            // Session state is missing — restart from channel selection
             authSession.removeAuthNote(AUTH_NOTE_CHANNEL);
             authenticate(context);
             return;
@@ -141,19 +175,30 @@ public class OtpChannelChoiceAuthenticator implements Authenticator {
         int maxRetries = getConfigInt(context, OtpChannelChoiceConst.CONFIG_MAX_RETRIES, OtpChannelChoiceConst.DEFAULT_MAX_RETRIES);
 
         if (Time.currentTime() > expiry) {
-            int codeLength = getConfigInt(context, OtpChannelChoiceConst.CONFIG_CODE_LENGTH, OtpChannelChoiceConst.DEFAULT_CODE_LENGTH);
-            int ttl = getConfigInt(context, OtpChannelChoiceConst.CONFIG_TTL, OtpChannelChoiceConst.DEFAULT_TTL);
-            String newCode = generateCode(codeLength);
-            authSession.setAuthNote(AUTH_NOTE_CODE, newCode);
-            authSession.setAuthNote(AUTH_NOTE_EXPIRY, String.valueOf(Time.currentTime() + ttl));
-            authSession.setAuthNote(AUTH_NOTE_ATTEMPTS, "0");
-            if (CHANNEL_EMAIL.equals(channel)) {
-                sendEmail(context, newCode);
-            } else {
-                sendSms(context, newCode);
+            int cooldown = getConfigInt(context, OtpChannelChoiceConst.CONFIG_SEND_COOLDOWN, OtpChannelChoiceConst.DEFAULT_SEND_COOLDOWN);
+            boolean reserved = OtpSendThrottle.tryReserve(context.getSession(), context.getRealm(), context.getUser(),
+                    throttleChannel, cooldown);
+            if (reserved) {
+                int codeLength = getConfigInt(context, OtpChannelChoiceConst.CONFIG_CODE_LENGTH, OtpChannelChoiceConst.DEFAULT_CODE_LENGTH);
+                int ttl = getConfigInt(context, OtpChannelChoiceConst.CONFIG_TTL, OtpChannelChoiceConst.DEFAULT_TTL);
+                String newCode = generateCode(codeLength);
+                authSession.setAuthNote(AUTH_NOTE_CODE, newCode);
+                authSession.setAuthNote(AUTH_NOTE_EXPIRY, String.valueOf(Time.currentTime() + ttl));
+                authSession.setAuthNote(AUTH_NOTE_ATTEMPTS, "0");
+                authSession.setAuthNote(AUTH_NOTE_LAST_SENT, String.valueOf(Time.currentTime()));
+                if (CHANNEL_EMAIL.equals(channel)) {
+                    sendEmail(context, newCode);
+                } else {
+                    sendSms(context, newCode);
+                }
             }
+            int remaining = OtpSendThrottle.remainingSeconds(context.getSession(), context.getRealm(),
+                    context.getUser(), throttleChannel);
             context.failureChallenge(AuthenticationFlowError.EXPIRED_CODE,
-                    context.form().setError(errorExpired).createForm(template));
+                    context.form()
+                            .setAttribute("resendAvailableInSeconds", remaining)
+                            .setError(errorExpired)
+                            .createForm(template));
             return;
         }
 
@@ -179,7 +224,6 @@ public class OtpChannelChoiceAuthenticator implements Authenticator {
 
     @Override
     public boolean configuredFor(KeycloakSession session, RealmModel realm, UserModel user) {
-        // Configured if user has email or phone
         return user.getEmail() != null || user.getFirstAttribute(SmsOtpConst.DEFAULT_PHONE_ATTRIBUTE) != null;
     }
 
