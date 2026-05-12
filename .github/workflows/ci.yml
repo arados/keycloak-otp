@@ -88,7 +88,9 @@ jobs:
         run: mvn compile spotbugs:check -B
 
       - name: OWASP Dependency-Check
-        run: mvn dependency-check:aggregate -B
+        env:
+          NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
+        run: mvn dependency-check:aggregate -DnvdApiKey="$NVD_API_KEY" -B
         continue-on-error: true
 
       - name: Upload dependency-check report
