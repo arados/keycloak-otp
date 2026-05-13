@@ -9,6 +9,9 @@ services:
       KC_HOSTNAME_STRICT: "false"
       KC_HTTP_ENABLED: "true"
       KC_SPI_THEME__FOLDER__ENABLED: "false"
+      # Dev-only: opt the default LogSmsSenderFactory into logging raw OTP codes so the
+      # E2E suite can extract them from `docker compose logs`. Never enable in production.
+      KEYCLOAK_OTP_LOG_SMS_UNSAFE: "true"
     ports:
       - "8080:8080"
     depends_on:

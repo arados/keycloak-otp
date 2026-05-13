@@ -457,8 +457,10 @@ class OtpChannelChoiceAuthenticatorTest {
     // --- Throttle / resend ---
 
     @Test
-    void action_selectEmailBypassesThrottleEvenIfActive() throws Exception {
-        // Initial channel selection always sends — throttle only applies to resend.
+    void action_selectEmailHonorsActiveThrottle() throws Exception {
+        // Initial channel selection is also throttled — defends against OTP spam via
+        // repeated channel-select restarts. Form is still rendered so the user can
+        // enter the previously sent code.
         setupCommonMocks();
         when(singleUseStore.putIfAbsent(anyString(), anyLong())).thenReturn(false);
         MultivaluedMap<String, String> formParams = new MultivaluedHashMap<>();
@@ -471,8 +473,8 @@ class OtpChannelChoiceAuthenticatorTest {
 
         authenticator.action(context);
 
-        verify(emailProvider).send(eq(EmailOtpConst.EMAIL_SUBJECT_KEY), eq(EmailOtpConst.EMAIL_TEMPLATE), any());
-        verify(authSession).setAuthNote(eq(OtpChannelChoiceAuthenticator.AUTH_NOTE_CODE), anyString());
+        verify(emailProvider, never()).send(anyString(), anyString(), any());
+        verify(authSession, never()).setAuthNote(eq(OtpChannelChoiceAuthenticator.AUTH_NOTE_CODE), anyString());
         verify(context).challenge(formResponse);
     }
 

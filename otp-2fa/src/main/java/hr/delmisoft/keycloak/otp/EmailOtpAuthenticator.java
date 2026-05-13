@@ -41,9 +41,9 @@ public class EmailOtpAuthenticator implements Authenticator {
             }
         }
 
-        // First send for this auth session — bypass throttle so a legitimate fresh login
-        // is never blocked. Resend button and grant-type endpoint remain throttled.
-        sendCode(context, /* honourThrottle= */ false);
+        // All sends — including the first send for a fresh auth session — honor the
+        // per-(realm, user, channel) cooldown to prevent OTP spam via rapid session restarts.
+        sendCode(context, /* honourThrottle= */ true);
     }
 
     @Override
@@ -67,13 +67,21 @@ public class EmailOtpAuthenticator implements Authenticator {
         String attemptsStr = authSession.getAuthNote(EmailOtpConst.AUTH_NOTE_ATTEMPTS);
 
         if (storedCode == null || expiryStr == null || attemptsStr == null) {
-            // Session state is missing or corrupted — recover by sending unconditionally
-            sendCode(context, /* honourThrottle= */ false);
+            // Session state is missing or corrupted — recover by sending (still throttled).
+            sendCode(context, /* honourThrottle= */ true);
             return;
         }
 
-        int expiry = Integer.parseInt(expiryStr);
-        int attempts = Integer.parseInt(attemptsStr);
+        int expiry;
+        int attempts;
+        try {
+            expiry = Integer.parseInt(expiryStr);
+            attempts = Integer.parseInt(attemptsStr);
+        } catch (NumberFormatException e) {
+            // Stored state is malformed — treat as corrupt and recover via a throttled resend.
+            sendCode(context, /* honourThrottle= */ true);
+            return;
+        }
         int maxRetries = getConfigInt(context, EmailOtpConst.CONFIG_MAX_RETRIES, EmailOtpConst.DEFAULT_MAX_RETRIES);
 
         // Check expiry — resend a new code if expired (subject to throttle)

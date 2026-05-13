@@ -263,9 +263,10 @@ class EmailOtpAuthenticatorTest {
     }
 
     @Test
-    void authenticate_freshSessionBypassesThrottleEvenIfActive() throws Exception {
-        // Initial send for a brand-new auth session must always succeed (UX over strict invariant).
-        // Throttle still applies to explicit resend and to grant-type endpoint.
+    void authenticate_freshSessionHonorsActiveThrottle() throws Exception {
+        // Initial send for a brand-new auth session is also throttled — defends against
+        // OTP spam via rapid session restarts. The form is still rendered (the previous
+        // send delivered a code the user can still enter).
         setupCommonMocks();
         when(singleUseStore.putIfAbsent(anyString(), anyLong())).thenReturn(false);
         when(context.form()).thenReturn(form);
@@ -274,9 +275,10 @@ class EmailOtpAuthenticatorTest {
 
         authenticator.authenticate(context);
 
-        // Email IS sent and code IS stored, despite the throttle being engaged.
-        verify(emailProvider).send(eq(EmailOtpConst.EMAIL_SUBJECT_KEY), eq(EmailOtpConst.EMAIL_TEMPLATE), any());
-        verify(authSession).setAuthNote(eq(EmailOtpConst.AUTH_NOTE_CODE), anyString());
+        // Email must NOT be re-sent while the cooldown is active.
+        verify(emailProvider, never()).send(anyString(), anyString(), any());
+        verify(authSession, never()).setAuthNote(eq(EmailOtpConst.AUTH_NOTE_CODE), anyString());
+        // The OTP form is still rendered so the user can enter the previously sent code.
         verify(context).challenge(formResponse);
     }
 

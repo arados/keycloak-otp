@@ -267,7 +267,8 @@ class SmsOtpAuthenticatorTest {
     }
 
     @Test
-    void authenticate_freshSessionBypassesThrottleEvenIfActive() throws Exception {
+    void authenticate_freshSessionHonorsActiveThrottle() throws Exception {
+        // Initial send for a brand-new auth session is also throttled to prevent OTP spam.
         setupCommonMocks();
         when(singleUseStore.putIfAbsent(anyString(), anyLong())).thenReturn(false);
         when(context.form()).thenReturn(form);
@@ -276,8 +277,8 @@ class SmsOtpAuthenticatorTest {
 
         authenticator.authenticate(context);
 
-        verify(smsProvider).send(eq("+1234567890"), anyString());
-        verify(authSession).setAuthNote(eq(SmsOtpConst.AUTH_NOTE_CODE), anyString());
+        verify(smsProvider, never()).send(anyString(), anyString());
+        verify(authSession, never()).setAuthNote(eq(SmsOtpConst.AUTH_NOTE_CODE), anyString());
         verify(context).challenge(formResponse);
     }
 

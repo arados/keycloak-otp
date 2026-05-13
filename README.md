@@ -271,15 +271,23 @@ Email OTP uses Keycloak's built-in email provider. Configure SMTP settings in th
 
 ## SMS Provider SPI
 
-SMS sending is pluggable via a custom SPI. The plugin ships with a **log** provider (`LogSmsSenderFactory`) that logs SMS messages to the Keycloak server log instead of sending them — useful for development and testing.
+SMS sending is pluggable via a custom SPI. The plugin ships with a **log** provider (`LogSmsSenderFactory`) that logs a redacted notice to the Keycloak server log instead of sending an SMS — useful as a safe default when no real gateway is configured.
 
 ### Using the Log Provider
 
-The log provider is active by default. OTP codes will appear in the Keycloak server log:
+The log provider is active by default. By default it logs only a masked destination and the payload length — OTP codes are **not** written to the log. The default output looks like:
 
 ```
-INFO  [hr.delmisoft.keycloak.otp.sms.LogSmsSenderFactory] SMS to +1234567890: Your verification code is: 123456
+INFO  [hr.delmisoft.keycloak.otp.sms.LogSmsSenderFactory] [DEV-ONLY] SMS dispatch suppressed (log provider); destination=+1***90, payload=37 chars (redacted)
 ```
+
+For local development (and the project's E2E suite) you can opt into logging the full message — including the OTP — by setting either the system property `keycloak.otp.logSms.unsafe=true` or the environment variable `KEYCLOAK_OTP_LOG_SMS_UNSAFE=true`. Keycloak emits a warning at startup when this mode is enabled:
+
+```
+INFO  [hr.delmisoft.keycloak.otp.sms.LogSmsSenderFactory] [DEV-ONLY] SMS to +1234567890: Your verification code is: 123456
+```
+
+> **Never enable unsafe mode in production.** Use the log provider only as a placeholder during development and replace it with a real SMS provider before deploying.
 
 ### Implementing a Custom SMS Provider
 

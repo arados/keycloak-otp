@@ -37,7 +37,9 @@ public class SmsOtpAuthenticator implements Authenticator {
             }
         }
 
-        sendCode(context, /* honourThrottle= */ false);
+        // All sends — including the first send for a fresh auth session — honor the
+        // per-(realm, user, channel) cooldown to prevent OTP spam via rapid session restarts.
+        sendCode(context, /* honourThrottle= */ true);
     }
 
     @Override
@@ -61,12 +63,19 @@ public class SmsOtpAuthenticator implements Authenticator {
         String attemptsStr = authSession.getAuthNote(SmsOtpConst.AUTH_NOTE_ATTEMPTS);
 
         if (storedCode == null || expiryStr == null || attemptsStr == null) {
-            sendCode(context, /* honourThrottle= */ false);
+            sendCode(context, /* honourThrottle= */ true);
             return;
         }
 
-        int expiry = Integer.parseInt(expiryStr);
-        int attempts = Integer.parseInt(attemptsStr);
+        int expiry;
+        int attempts;
+        try {
+            expiry = Integer.parseInt(expiryStr);
+            attempts = Integer.parseInt(attemptsStr);
+        } catch (NumberFormatException e) {
+            sendCode(context, /* honourThrottle= */ true);
+            return;
+        }
         int maxRetries = getConfigInt(context, SmsOtpConst.CONFIG_MAX_RETRIES, SmsOtpConst.DEFAULT_MAX_RETRIES);
 
         if (Time.currentTime() > expiry) {

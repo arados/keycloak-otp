@@ -91,8 +91,8 @@ public class OtpChannelChoiceAuthenticator implements Authenticator {
         authSession.removeAuthNote(AUTH_NOTE_LAST_SENT);
         authSession.setAuthNote(AUTH_NOTE_CHANNEL, channel);
 
-        // First send for this auth session — bypass throttle to allow legitimate login.
-        sendCodeAndChallenge(context, channel, /* honourThrottle= */ false);
+        // First send is throttled too — defends against OTP spam via repeated channel-select restarts.
+        sendCodeAndChallenge(context, channel);
     }
 
     private void handleResend(AuthenticationFlowContext context) {
@@ -102,24 +102,16 @@ public class OtpChannelChoiceAuthenticator implements Authenticator {
             authenticate(context);
             return;
         }
-        sendCodeAndChallenge(context, channel, /* honourThrottle= */ true);
+        sendCodeAndChallenge(context, channel);
     }
 
-    private void sendCodeAndChallenge(AuthenticationFlowContext context, String channel, boolean honourThrottle) {
+    private void sendCodeAndChallenge(AuthenticationFlowContext context, String channel) {
         String throttleChannel = CHANNEL_EMAIL.equals(channel) ? OtpSendThrottle.CHANNEL_EMAIL : OtpSendThrottle.CHANNEL_SMS;
         String template = CHANNEL_EMAIL.equals(channel) ? EmailOtpConst.LOGIN_TEMPLATE : SmsOtpConst.LOGIN_TEMPLATE;
 
         int cooldown = getConfigInt(context, OtpChannelChoiceConst.CONFIG_SEND_COOLDOWN, OtpChannelChoiceConst.DEFAULT_SEND_COOLDOWN);
-        boolean canSend;
-        if (honourThrottle) {
-            canSend = OtpSendThrottle.tryReserve(context.getSession(), context.getRealm(), context.getUser(),
-                    throttleChannel, cooldown);
-        } else {
-            // Send anyway, but update the throttle so subsequent resends are gated.
-            OtpSendThrottle.tryReserve(context.getSession(), context.getRealm(), context.getUser(),
-                    throttleChannel, cooldown);
-            canSend = true;
-        }
+        boolean canSend = OtpSendThrottle.tryReserve(context.getSession(), context.getRealm(), context.getUser(),
+                throttleChannel, cooldown);
 
         if (canSend) {
             int codeLength = getConfigInt(context, OtpChannelChoiceConst.CONFIG_CODE_LENGTH, OtpChannelChoiceConst.DEFAULT_CODE_LENGTH);
@@ -170,8 +162,16 @@ public class OtpChannelChoiceAuthenticator implements Authenticator {
             return;
         }
 
-        int expiry = Integer.parseInt(expiryStr);
-        int attempts = Integer.parseInt(attemptsStr);
+        int expiry;
+        int attempts;
+        try {
+            expiry = Integer.parseInt(expiryStr);
+            attempts = Integer.parseInt(attemptsStr);
+        } catch (NumberFormatException e) {
+            authSession.removeAuthNote(AUTH_NOTE_CHANNEL);
+            authenticate(context);
+            return;
+        }
         int maxRetries = getConfigInt(context, OtpChannelChoiceConst.CONFIG_MAX_RETRIES, OtpChannelChoiceConst.DEFAULT_MAX_RETRIES);
 
         if (Time.currentTime() > expiry) {

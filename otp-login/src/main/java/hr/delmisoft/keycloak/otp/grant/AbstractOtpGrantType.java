@@ -27,6 +27,7 @@ import org.keycloak.services.CorsErrorResponseException;
 import org.keycloak.services.Urls;
 import org.keycloak.services.managers.AuthenticationManager;
 import org.keycloak.services.managers.AuthenticationSessionManager;
+import org.keycloak.services.managers.BruteForceProtector;
 import org.keycloak.sessions.AuthenticationSessionModel;
 import org.keycloak.sessions.RootAuthenticationSessionModel;
 
@@ -46,11 +47,14 @@ public abstract class AbstractOtpGrantType extends OAuth2GrantTypeBase {
 
     static final String NOTE_CODE = "code";
     static final String NOTE_USER_ID = "userId";
+    static final String NOTE_CLIENT_ID = "clientId";
     static final String NOTE_ATTEMPTS = "attempts";
 
     static final int DEFAULT_CODE_LENGTH = 6;
     static final int DEFAULT_TTL = 300;
     static final int DEFAULT_MAX_RETRIES = 3;
+
+    private static final String GENERIC_INVALID_CREDENTIALS = "Invalid user credentials";
 
     @Override
     public Response process(Context context) {
@@ -80,28 +84,45 @@ public abstract class AbstractOtpGrantType extends OAuth2GrantTypeBase {
         }
 
         UserModel user = lookupUser(username);
+        // Normalize unknown/disabled accounts to the same response to avoid account-state
+        // enumeration via the public token endpoint.
         if (user == null) {
             event.error(Errors.USER_NOT_FOUND);
-            throw new CorsErrorResponseException(cors, OAuthErrorException.INVALID_GRANT,
-                    "Invalid user credentials", Response.Status.UNAUTHORIZED);
+            throw invalidCredentials();
         }
-
         if (!user.isEnabled()) {
             event.error(Errors.USER_DISABLED);
-            throw new CorsErrorResponseException(cors, OAuthErrorException.INVALID_GRANT,
-                    "Account disabled", Response.Status.BAD_REQUEST);
+            throw invalidCredentials();
         }
 
         event.user(user);
+
+        // Honor Keycloak's brute-force lockout, so the OTP grant cannot be used to
+        // bypass the protections applied to the standard authentication flow.
+        if (realm.isBruteForceProtected()) {
+            BruteForceProtector bfp = session.getProvider(BruteForceProtector.class);
+            if (bfp != null && bfp.isTemporarilyDisabled(session, realm, user)) {
+                event.error(Errors.USER_TEMPORARILY_DISABLED);
+                throw invalidCredentials();
+            }
+        }
 
         // Validate password if provided
         String password = formParams.getFirst("password");
         if (password != null && !password.isEmpty()) {
             if (!user.credentialManager().isValid(UserCredentialModel.password(password))) {
+                recordBruteForceFailure(user);
                 event.error(Errors.INVALID_USER_CREDENTIALS);
-                throw new CorsErrorResponseException(cors, OAuthErrorException.INVALID_GRANT,
-                        "Invalid user credentials", Response.Status.UNAUTHORIZED);
+                throw invalidCredentials();
             }
+        }
+
+        // Refuse to issue tokens while the account still has required actions pending —
+        // matches Keycloak's behavior for the standard direct-grant flow.
+        if (user.getRequiredActionsStream().findAny().isPresent()) {
+            event.error(Errors.RESOLVE_REQUIRED_ACTIONS);
+            throw new CorsErrorResponseException(cors, OAuthErrorException.INVALID_GRANT,
+                    "Account is not fully set up", Response.Status.BAD_REQUEST);
         }
 
         // Check if this is phase 2 (OTP submission)
@@ -112,6 +133,21 @@ public abstract class AbstractOtpGrantType extends OAuth2GrantTypeBase {
             return handlePhase1(user);
         } else {
             return handlePhase2(user, otp, otpSessionId, scope);
+        }
+    }
+
+    private CorsErrorResponseException invalidCredentials() {
+        return new CorsErrorResponseException(cors, OAuthErrorException.INVALID_GRANT,
+                GENERIC_INVALID_CREDENTIALS, Response.Status.UNAUTHORIZED);
+    }
+
+    private void recordBruteForceFailure(UserModel user) {
+        if (!realm.isBruteForceProtected()) {
+            return;
+        }
+        BruteForceProtector bfp = session.getProvider(BruteForceProtector.class);
+        if (bfp != null) {
+            bfp.failedLogin(realm, user, clientConnection, session.getContext().getUri(), client.getClientId());
         }
     }
 
@@ -141,6 +177,7 @@ public abstract class AbstractOtpGrantType extends OAuth2GrantTypeBase {
         Map<String, String> notes = new HashMap<>();
         notes.put(NOTE_CODE, code);
         notes.put(NOTE_USER_ID, user.getId());
+        notes.put(NOTE_CLIENT_ID, client.getClientId());
         notes.put(NOTE_ATTEMPTS, "0");
 
         SingleUseObjectProvider store = session.getProvider(SingleUseObjectProvider.class);
@@ -215,8 +252,27 @@ public abstract class AbstractOtpGrantType extends OAuth2GrantTypeBase {
                     "Invalid OTP session", Response.Status.UNAUTHORIZED);
         }
 
-        // Check max retries
-        int attempts = Integer.parseInt(notes.get(NOTE_ATTEMPTS));
+        // Verify client binding — refuse to redeem an OTP session against a different client
+        // than the one that initiated phase 1. Pre-1.1.0 sessions without a clientId note
+        // also count as invalid here, since they predate this binding.
+        String storedClientId = notes.get(NOTE_CLIENT_ID);
+        if (storedClientId == null || !storedClientId.equals(client.getClientId())) {
+            store.remove(otpSessionId);
+            event.error(Errors.INVALID_CLIENT_CREDENTIALS);
+            throw new CorsErrorResponseException(cors, OAuthErrorException.INVALID_GRANT,
+                    "Invalid OTP session", Response.Status.UNAUTHORIZED);
+        }
+
+        // Check max retries (treat malformed counter as session-corrupt and fail closed).
+        int attempts;
+        try {
+            attempts = Integer.parseInt(notes.get(NOTE_ATTEMPTS));
+        } catch (NumberFormatException e) {
+            store.remove(otpSessionId);
+            event.error(Errors.INVALID_USER_CREDENTIALS);
+            throw new CorsErrorResponseException(cors, getSessionExpiredError(),
+                    "OTP session is corrupt", Response.Status.UNAUTHORIZED);
+        }
         if (attempts >= DEFAULT_MAX_RETRIES) {
             store.remove(otpSessionId);
             event.error(Errors.INVALID_USER_CREDENTIALS);
@@ -236,6 +292,7 @@ public abstract class AbstractOtpGrantType extends OAuth2GrantTypeBase {
         if (!MessageDigest.isEqual(storedCode.getBytes(StandardCharsets.UTF_8), otp.getBytes(StandardCharsets.UTF_8))) {
             notes.put(NOTE_ATTEMPTS, String.valueOf(attempts + 1));
             store.replace(otpSessionId, notes);
+            recordBruteForceFailure(user);
             event.error(Errors.INVALID_USER_CREDENTIALS);
             throw new CorsErrorResponseException(cors, getOtpInvalidError(),
                     "Invalid OTP code", Response.Status.UNAUTHORIZED);
