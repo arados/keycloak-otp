@@ -1,9 +1,19 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <suppressions xmlns="https://jeremylong.github.io/DependencyCheck/dependency-suppression.1.3.xsd">
-    <!-- Add false-positive suppressions here. Example:
-    <suppress>
-        <notes>False positive - not affected because we use scope=provided</notes>
-        <cve>CVE-2024-XXXXX</cve>
-    </suppress>
+
+    <!--
+        False positive: our plugin artifacts (hr.delmisoft.keycloak:keycloak-otp-*)
+        are heuristically matched by OWASP's CPE analyzer against
+        cpe:/a:redhat:keycloak because the artifactIds contain the substring
+        "keycloak". The flagged CVEs (CVE-2014-3651, CVE-2014-3709,
+        CVE-2017-12161) are vulnerabilities in the Keycloak server itself
+        (versions 1.x era), not in our plugin. We don't ship Keycloak — we are
+        a provider deployed into it.
     -->
+    <suppress>
+        <notes>CPE name-collision: our plugin artifacts are not Keycloak server.</notes>
+        <packageUrl regex="true">^pkg:maven/hr\.delmisoft\.keycloak/keycloak-otp-.*$</packageUrl>
+        <cpe>cpe:/a:redhat:keycloak</cpe>
+    </suppress>
+
 </suppressions>

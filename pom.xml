@@ -105,6 +105,12 @@
                     <version>11.1.1</version>
                     <configuration>
                         <failBuildOnCVSS>7</failBuildOnCVSS>
+                        <!-- Skip dependency scopes we do not ship in the shaded JAR.
+                             keycloak-* and their transitive runtime libs (gRPC, Netty,
+                             Quarkus, Protobuf, OpenTelemetry, Vert.x, …) are all
+                             provided by the Keycloak container at runtime. -->
+                        <skipProvidedScope>true</skipProvidedScope>
+                        <skipTestScope>true</skipTestScope>
                         <suppressionFiles>
                             <suppressionFile>dependency-check-suppressions.xml</suppressionFile>
                         </suppressionFiles>
