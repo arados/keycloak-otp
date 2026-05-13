@@ -79,6 +79,16 @@ class EmailOtpAuthenticatorTest {
         when(emailProvider.setUser(any())).thenReturn(emailProvider);
     }
 
+    private void stubStoredCode(String plainCode, int secondsUntilExpiry, String attempts) {
+        String salt = OtpHash.newSalt();
+        String hash = OtpHash.hash(plainCode, salt);
+        when(authSession.getAuthNote(EmailOtpConst.AUTH_NOTE_CODE_HASH)).thenReturn(hash);
+        when(authSession.getAuthNote(EmailOtpConst.AUTH_NOTE_CODE_SALT)).thenReturn(salt);
+        when(authSession.getAuthNote(EmailOtpConst.AUTH_NOTE_EXPIRY))
+                .thenReturn(String.valueOf(Time.currentTime() + secondsUntilExpiry));
+        when(authSession.getAuthNote(EmailOtpConst.AUTH_NOTE_ATTEMPTS)).thenReturn(attempts);
+    }
+
     @Test
     void authenticate_sendsEmailAndChallenge() throws Exception {
         setupCommonMocks();
@@ -88,20 +98,18 @@ class EmailOtpAuthenticatorTest {
 
         authenticator.authenticate(context);
 
-        // Verify code was stored in auth session
-        verify(authSession).setAuthNote(eq(EmailOtpConst.AUTH_NOTE_CODE), anyString());
+        verify(authSession).setAuthNote(eq(EmailOtpConst.AUTH_NOTE_CODE_HASH), anyString());
+        verify(authSession).setAuthNote(eq(EmailOtpConst.AUTH_NOTE_CODE_SALT), anyString());
         verify(authSession).setAuthNote(eq(EmailOtpConst.AUTH_NOTE_EXPIRY), anyString());
         verify(authSession).setAuthNote(eq(EmailOtpConst.AUTH_NOTE_ATTEMPTS), eq("0"));
 
-        // Verify email was sent
         verify(emailProvider).send(eq(EmailOtpConst.EMAIL_SUBJECT_KEY), eq(EmailOtpConst.EMAIL_TEMPLATE), any());
 
-        // Verify challenge was issued
         verify(context).challenge(formResponse);
     }
 
     @Test
-    void authenticate_emailFailure_returnsError() throws Exception {
+    void authenticate_emailFailure_rollsBackThrottleAndClearsSession() throws Exception {
         setupCommonMocks();
         when(context.form()).thenReturn(form);
         when(form.setAttribute(anyString(), any())).thenReturn(form);
@@ -113,6 +121,12 @@ class EmailOtpAuthenticatorTest {
 
         verify(context).failureChallenge(eq(AuthenticationFlowError.INTERNAL_ERROR), any());
         verify(context, never()).challenge(any());
+        // REL-001: throttle rolled back (release removes both key and key:meta entries) so the
+        // user is not locked out by a cooldown protecting an OTP they never received; auth
+        // notes cleared so we don't later "recover" an undelivered code into a fresh session.
+        verify(singleUseStore, org.mockito.Mockito.times(2)).remove(anyString());
+        verify(authSession).removeAuthNote(EmailOtpConst.AUTH_NOTE_CODE_HASH);
+        verify(authSession).removeAuthNote(EmailOtpConst.AUTH_NOTE_CODE_SALT);
     }
 
     @Test
@@ -124,9 +138,7 @@ class EmailOtpAuthenticatorTest {
         when(httpRequest.getDecodedFormParameters()).thenReturn(formParams);
         when(context.getAuthenticationSession()).thenReturn(authSession);
         when(context.getAuthenticatorConfig()).thenReturn(null);
-        when(authSession.getAuthNote(EmailOtpConst.AUTH_NOTE_CODE)).thenReturn("123456");
-        when(authSession.getAuthNote(EmailOtpConst.AUTH_NOTE_EXPIRY)).thenReturn(String.valueOf(Time.currentTime() + 300));
-        when(authSession.getAuthNote(EmailOtpConst.AUTH_NOTE_ATTEMPTS)).thenReturn("0");
+        stubStoredCode("123456", 300, "0");
 
         authenticator.action(context);
 
@@ -142,9 +154,7 @@ class EmailOtpAuthenticatorTest {
         when(httpRequest.getDecodedFormParameters()).thenReturn(formParams);
         when(context.getAuthenticationSession()).thenReturn(authSession);
         when(context.getAuthenticatorConfig()).thenReturn(null);
-        when(authSession.getAuthNote(EmailOtpConst.AUTH_NOTE_CODE)).thenReturn("123456");
-        when(authSession.getAuthNote(EmailOtpConst.AUTH_NOTE_EXPIRY)).thenReturn(String.valueOf(Time.currentTime() + 300));
-        when(authSession.getAuthNote(EmailOtpConst.AUTH_NOTE_ATTEMPTS)).thenReturn("0");
+        stubStoredCode("123456", 300, "0");
         when(context.form()).thenReturn(form);
         when(form.setAttribute(anyString(), any())).thenReturn(form);
         when(form.setError(anyString())).thenReturn(form);
@@ -183,9 +193,7 @@ class EmailOtpAuthenticatorTest {
         setupCommonMocks();
         when(context.getHttpRequest()).thenReturn(httpRequest);
         when(httpRequest.getDecodedFormParameters()).thenReturn(formParams);
-        when(authSession.getAuthNote(EmailOtpConst.AUTH_NOTE_CODE)).thenReturn("123456");
-        when(authSession.getAuthNote(EmailOtpConst.AUTH_NOTE_EXPIRY)).thenReturn(String.valueOf(Time.currentTime() - 10));
-        when(authSession.getAuthNote(EmailOtpConst.AUTH_NOTE_ATTEMPTS)).thenReturn("0");
+        stubStoredCode("123456", -10, "0");
         when(context.form()).thenReturn(form);
         when(form.setAttribute(anyString(), any())).thenReturn(form);
         when(form.setError(anyString())).thenReturn(form);
@@ -193,10 +201,9 @@ class EmailOtpAuthenticatorTest {
 
         authenticator.action(context);
 
-        // Verify new code was generated and email resent
-        ArgumentCaptor<String> codeCaptor = ArgumentCaptor.forClass(String.class);
-        verify(authSession).setAuthNote(eq(EmailOtpConst.AUTH_NOTE_CODE), codeCaptor.capture());
-        assertThat(codeCaptor.getValue(), notNullValue());
+        ArgumentCaptor<String> hashCaptor = ArgumentCaptor.forClass(String.class);
+        verify(authSession).setAuthNote(eq(EmailOtpConst.AUTH_NOTE_CODE_HASH), hashCaptor.capture());
+        assertThat(hashCaptor.getValue(), notNullValue());
         verify(emailProvider).send(eq(EmailOtpConst.EMAIL_SUBJECT_KEY), eq(EmailOtpConst.EMAIL_TEMPLATE), any());
         verify(context).failureChallenge(eq(AuthenticationFlowError.EXPIRED_CODE), any());
     }
@@ -210,9 +217,7 @@ class EmailOtpAuthenticatorTest {
         when(httpRequest.getDecodedFormParameters()).thenReturn(formParams);
         when(context.getAuthenticationSession()).thenReturn(authSession);
         when(context.getAuthenticatorConfig()).thenReturn(null);
-        when(authSession.getAuthNote(EmailOtpConst.AUTH_NOTE_CODE)).thenReturn("123456");
-        when(authSession.getAuthNote(EmailOtpConst.AUTH_NOTE_EXPIRY)).thenReturn(String.valueOf(Time.currentTime() + 300));
-        when(authSession.getAuthNote(EmailOtpConst.AUTH_NOTE_ATTEMPTS)).thenReturn("3");
+        stubStoredCode("123456", 300, "3");
         when(context.form()).thenReturn(form);
         when(form.setAttribute(anyString(), any())).thenReturn(form);
         when(form.setError(anyString())).thenReturn(form);
@@ -238,9 +243,9 @@ class EmailOtpAuthenticatorTest {
 
         authenticator.authenticate(context);
 
-        ArgumentCaptor<String> codeCaptor = ArgumentCaptor.forClass(String.class);
-        verify(authSession).setAuthNote(eq(EmailOtpConst.AUTH_NOTE_CODE), codeCaptor.capture());
-        assertThat(codeCaptor.getValue().length(), equalTo(8));
+        verify(authSession).setAuthNote(eq(EmailOtpConst.AUTH_NOTE_CODE_HASH), anyString());
+        verify(authSession).setAuthNote(eq(EmailOtpConst.AUTH_NOTE_CODE_SALT), anyString());
+        verify(emailProvider).send(anyString(), anyString(), any());
     }
 
     @Test
@@ -249,36 +254,63 @@ class EmailOtpAuthenticatorTest {
         when(context.form()).thenReturn(form);
         when(form.setAttribute(anyString(), any())).thenReturn(form);
         when(form.createForm(EmailOtpConst.LOGIN_TEMPLATE)).thenReturn(formResponse);
-        when(authSession.getAuthNote(EmailOtpConst.AUTH_NOTE_CODE)).thenReturn("123456");
-        when(authSession.getAuthNote(EmailOtpConst.AUTH_NOTE_EXPIRY)).thenReturn(String.valueOf(Time.currentTime() + 200));
+        when(authSession.getAuthNote(EmailOtpConst.AUTH_NOTE_CODE_HASH)).thenReturn("any-hash");
+        when(authSession.getAuthNote(EmailOtpConst.AUTH_NOTE_CODE_SALT)).thenReturn("any-salt");
+        when(authSession.getAuthNote(EmailOtpConst.AUTH_NOTE_EXPIRY))
+                .thenReturn(String.valueOf(Time.currentTime() + 200));
 
         authenticator.authenticate(context);
 
-        // Email must NOT be re-sent on refresh
         verify(emailProvider, never()).send(anyString(), anyString(), any());
-        // Throttle slot must NOT be touched
         verify(singleUseStore, never()).putIfAbsent(anyString(), anyLong());
-        // Form is still shown
         verify(context).challenge(formResponse);
     }
 
     @Test
     void authenticate_freshSessionHonorsActiveThrottle() throws Exception {
         // Initial send for a brand-new auth session is also throttled — defends against
-        // OTP spam via rapid session restarts. The form is still rendered (the previous
-        // send delivered a code the user can still enter).
+        // OTP spam via rapid session restarts. With no stashed code available, the form is
+        // still rendered so the corrupt-state path can later recover.
         setupCommonMocks();
         when(singleUseStore.putIfAbsent(anyString(), anyLong())).thenReturn(false);
+        when(singleUseStore.get(anyString())).thenReturn(null);
         when(context.form()).thenReturn(form);
         when(form.setAttribute(anyString(), any())).thenReturn(form);
         when(form.createForm(EmailOtpConst.LOGIN_TEMPLATE)).thenReturn(formResponse);
 
         authenticator.authenticate(context);
 
-        // Email must NOT be re-sent while the cooldown is active.
         verify(emailProvider, never()).send(anyString(), anyString(), any());
-        verify(authSession, never()).setAuthNote(eq(EmailOtpConst.AUTH_NOTE_CODE), anyString());
-        // The OTP form is still rendered so the user can enter the previously sent code.
+        verify(authSession, never()).setAuthNote(eq(EmailOtpConst.AUTH_NOTE_CODE_HASH), anyString());
+        verify(context).challenge(formResponse);
+    }
+
+    @Test
+    void authenticate_freshSessionWithStashedCode_recoversCodeIntoSession() throws Exception {
+        // When the cooldown is active AND a recently-sent code's hash/salt is stashed in the
+        // throttle store, a fresh auth session must recover that state so the user who
+        // legitimately restarted their login can still complete it with the code they
+        // already received.
+        setupCommonMocks();
+        when(singleUseStore.putIfAbsent(anyString(), anyLong())).thenReturn(false);
+        int stashedExpiry = Time.currentTime() + 200;
+        Map<String, String> stashedMeta = new HashMap<>();
+        stashedMeta.put("expiresAt", String.valueOf(Time.currentTime() + 30));
+        stashedMeta.put("codeHash", "stashed-hash");
+        stashedMeta.put("codeSalt", "stashed-salt");
+        stashedMeta.put("codeExpiresAt", String.valueOf(stashedExpiry));
+        when(singleUseStore.get(anyString())).thenReturn(stashedMeta);
+        when(context.form()).thenReturn(form);
+        when(form.setAttribute(anyString(), any())).thenReturn(form);
+        when(form.createForm(EmailOtpConst.LOGIN_TEMPLATE)).thenReturn(formResponse);
+
+        authenticator.authenticate(context);
+
+        verify(emailProvider, never()).send(anyString(), anyString(), any());
+        verify(authSession).setAuthNote(EmailOtpConst.AUTH_NOTE_CODE_HASH, "stashed-hash");
+        verify(authSession).setAuthNote(EmailOtpConst.AUTH_NOTE_CODE_SALT, "stashed-salt");
+        verify(authSession).setAuthNote(EmailOtpConst.AUTH_NOTE_EXPIRY, String.valueOf(stashedExpiry));
+        verify(authSession).setAuthNote(EmailOtpConst.AUTH_NOTE_ATTEMPTS, "0");
         verify(context).challenge(formResponse);
     }
 
@@ -296,11 +328,9 @@ class EmailOtpAuthenticatorTest {
 
         authenticator.action(context);
 
-        ArgumentCaptor<String> codeCaptor = ArgumentCaptor.forClass(String.class);
-        verify(authSession).setAuthNote(eq(EmailOtpConst.AUTH_NOTE_CODE), codeCaptor.capture());
+        verify(authSession).setAuthNote(eq(EmailOtpConst.AUTH_NOTE_CODE_HASH), anyString());
         verify(emailProvider).send(eq(EmailOtpConst.EMAIL_SUBJECT_KEY), eq(EmailOtpConst.EMAIL_TEMPLATE), any());
         verify(context).challenge(formResponse);
-        assertThat(codeCaptor.getValue().length(), equalTo(6));
     }
 
     @Test
@@ -310,6 +340,7 @@ class EmailOtpAuthenticatorTest {
 
         setupCommonMocks();
         when(singleUseStore.putIfAbsent(anyString(), anyLong())).thenReturn(false);
+        when(singleUseStore.get(anyString())).thenReturn(null);
         when(context.getHttpRequest()).thenReturn(httpRequest);
         when(httpRequest.getDecodedFormParameters()).thenReturn(formParams);
         when(context.form()).thenReturn(form);
@@ -319,7 +350,7 @@ class EmailOtpAuthenticatorTest {
         authenticator.action(context);
 
         verify(emailProvider, never()).send(anyString(), anyString(), any());
-        verify(authSession, never()).setAuthNote(eq(EmailOtpConst.AUTH_NOTE_CODE), anyString());
+        verify(authSession, never()).setAuthNote(eq(EmailOtpConst.AUTH_NOTE_CODE_HASH), anyString());
         verify(context).challenge(formResponse);
     }
 
@@ -329,8 +360,25 @@ class EmailOtpAuthenticatorTest {
     }
 
     @Test
-    void configuredFor_userWithEmail_returnsTrue() {
+    void configuredFor_userWithVerifiedEmail_returnsTrue() {
         when(user.getEmail()).thenReturn("test@example.com");
+        when(user.isEmailVerified()).thenReturn(true);
+        assertThat(authenticator.configuredFor(session, realm, user), equalTo(true));
+    }
+
+    @Test
+    void configuredFor_userWithUnverifiedEmail_returnsFalseByDefault() {
+        // SEC-003: unverified email is rejected unless emailOtp.requireVerifiedEmail=false
+        when(user.getEmail()).thenReturn("test@example.com");
+        when(user.isEmailVerified()).thenReturn(false);
+        assertThat(authenticator.configuredFor(session, realm, user), equalTo(false));
+    }
+
+    @Test
+    void configuredFor_unverifiedEmailAllowedWhenRequireVerifiedFalse() {
+        when(realm.getAttribute(EmailOtpConst.CONFIG_REQUIRE_VERIFIED_EMAIL)).thenReturn("false");
+        when(user.getEmail()).thenReturn("test@example.com");
+        when(user.isEmailVerified()).thenReturn(false);
         assertThat(authenticator.configuredFor(session, realm, user), equalTo(true));
     }
 

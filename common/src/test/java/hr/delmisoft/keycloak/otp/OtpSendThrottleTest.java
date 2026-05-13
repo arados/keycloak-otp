@@ -136,4 +136,85 @@ class OtpSendThrottleTest {
 
         assertThat(remaining, equalTo(0));
     }
+
+    @Test
+    void tryReserveWithCodeHash_onSuccess_stashesHashAndSaltInMeta() {
+        when(store.putIfAbsent(anyString(), anyLong())).thenReturn(true);
+        int codeExpiresAt = org.keycloak.common.util.Time.currentTime() + 300;
+
+        boolean reserved = OtpSendThrottle.tryReserveWithCodeHash(session, realm, user,
+                OtpSendThrottle.CHANNEL_EMAIL, 60, "hash-value", "salt-value", codeExpiresAt);
+
+        assertThat(reserved, equalTo(true));
+        ArgumentCaptor<Map> notesCaptor = ArgumentCaptor.forClass(Map.class);
+        verify(store).put(anyString(), anyLong(), notesCaptor.capture());
+        Map<String, String> notes = notesCaptor.getValue();
+        assertThat(notes.get("codeHash"), equalTo("hash-value"));
+        assertThat(notes.get("codeSalt"), equalTo("salt-value"));
+        assertThat(notes.get("codeExpiresAt"), equalTo(String.valueOf(codeExpiresAt)));
+    }
+
+    @Test
+    void release_removesBothKeyAndMeta() {
+        OtpSendThrottle.release(session, realm, user, OtpSendThrottle.CHANNEL_EMAIL);
+
+        ArgumentCaptor<String> keyCaptor = ArgumentCaptor.forClass(String.class);
+        verify(store, org.mockito.Mockito.times(2)).remove(keyCaptor.capture());
+        assertThat(keyCaptor.getAllValues().get(1), equalTo(keyCaptor.getAllValues().get(0) + ":meta"));
+    }
+
+    @Test
+    void getRecentCode_noMeta_returnsNull() {
+        when(store.get(anyString())).thenReturn(null);
+
+        OtpSendThrottle.RecentCode recent = OtpSendThrottle.getRecentCode(session, realm, user,
+                OtpSendThrottle.CHANNEL_EMAIL);
+
+        assertThat(recent, equalTo(null));
+    }
+
+    @Test
+    void getRecentCode_withActiveStash_returnsHashSaltAndExpiry() {
+        int codeExpiresAt = org.keycloak.common.util.Time.currentTime() + 120;
+        Map<String, String> meta = new HashMap<>();
+        meta.put("expiresAt", String.valueOf(org.keycloak.common.util.Time.currentTime() + 60));
+        meta.put("codeHash", "stored-hash");
+        meta.put("codeSalt", "stored-salt");
+        meta.put("codeExpiresAt", String.valueOf(codeExpiresAt));
+        when(store.get(anyString())).thenReturn(meta);
+
+        OtpSendThrottle.RecentCode recent = OtpSendThrottle.getRecentCode(session, realm, user,
+                OtpSendThrottle.CHANNEL_EMAIL);
+
+        assertThat(recent, org.hamcrest.Matchers.notNullValue());
+        assertThat(recent.codeHash, equalTo("stored-hash"));
+        assertThat(recent.codeSalt, equalTo("stored-salt"));
+        assertThat(recent.expiresAt, equalTo(codeExpiresAt));
+    }
+
+    @Test
+    void getRecentCode_expiredCode_returnsNull() {
+        Map<String, String> meta = new HashMap<>();
+        meta.put("codeHash", "h");
+        meta.put("codeSalt", "s");
+        meta.put("codeExpiresAt", String.valueOf(org.keycloak.common.util.Time.currentTime() - 10));
+        when(store.get(anyString())).thenReturn(meta);
+
+        OtpSendThrottle.RecentCode recent = OtpSendThrottle.getRecentCode(session, realm, user,
+                OtpSendThrottle.CHANNEL_EMAIL);
+
+        assertThat(recent, equalTo(null));
+    }
+
+    @Test
+    void getRecentCode_metaWithoutHash_returnsNull() {
+        Map<String, String> meta = new HashMap<>();
+        meta.put("expiresAt", String.valueOf(org.keycloak.common.util.Time.currentTime() + 30));
+        when(store.get(anyString())).thenReturn(meta);
+
+        OtpSendThrottle.RecentCode recent = OtpSendThrottle.getRecentCode(session, realm, user,
+                OtpSendThrottle.CHANNEL_EMAIL);
+
+        assertThat(recent, equalTo(null));
+    }
 }

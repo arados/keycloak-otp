@@ -32,6 +32,7 @@ import org.mockito.quality.Strictness;
 import hr.delmisoft.keycloak.otp.sms.SmsException;
 import hr.delmisoft.keycloak.otp.sms.SmsOtpConst;
 import hr.delmisoft.keycloak.otp.sms.SmsProvider;
+import hr.delmisoft.keycloak.otp.OtpHash;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.equalTo;
@@ -86,6 +87,17 @@ class OtpChannelChoiceAuthenticatorTest {
         when(user.getFirstAttribute(SmsOtpConst.DEFAULT_PHONE_ATTRIBUTE)).thenReturn("+1234567890");
     }
 
+    private void stubStoredCode(String channel, String plainCode, int secondsUntilExpiry, String attempts) {
+        String salt = OtpHash.newSalt();
+        String hash = OtpHash.hash(plainCode, salt);
+        when(authSession.getAuthNote(OtpChannelChoiceAuthenticator.AUTH_NOTE_CHANNEL)).thenReturn(channel);
+        when(authSession.getAuthNote(OtpChannelChoiceAuthenticator.AUTH_NOTE_CODE_HASH)).thenReturn(hash);
+        when(authSession.getAuthNote(OtpChannelChoiceAuthenticator.AUTH_NOTE_CODE_SALT)).thenReturn(salt);
+        when(authSession.getAuthNote(OtpChannelChoiceAuthenticator.AUTH_NOTE_EXPIRY))
+                .thenReturn(String.valueOf(Time.currentTime() + secondsUntilExpiry));
+        when(authSession.getAuthNote(OtpChannelChoiceAuthenticator.AUTH_NOTE_ATTEMPTS)).thenReturn(attempts);
+    }
+
     // --- authenticate() ---
 
     @Test
@@ -115,7 +127,7 @@ class OtpChannelChoiceAuthenticatorTest {
         authenticator.action(context);
 
         verify(authSession).setAuthNote(eq(OtpChannelChoiceAuthenticator.AUTH_NOTE_CHANNEL), eq("email"));
-        verify(authSession).setAuthNote(eq(OtpChannelChoiceAuthenticator.AUTH_NOTE_CODE), anyString());
+        verify(authSession).setAuthNote(eq(OtpChannelChoiceAuthenticator.AUTH_NOTE_CODE_HASH), anyString());
         verify(authSession).setAuthNote(eq(OtpChannelChoiceAuthenticator.AUTH_NOTE_EXPIRY), anyString());
         verify(authSession).setAuthNote(eq(OtpChannelChoiceAuthenticator.AUTH_NOTE_ATTEMPTS), eq("0"));
         verify(emailProvider).send(eq(EmailOtpConst.EMAIL_SUBJECT_KEY), eq(EmailOtpConst.EMAIL_TEMPLATE), any());
@@ -222,10 +234,7 @@ class OtpChannelChoiceAuthenticatorTest {
         when(httpRequest.getDecodedFormParameters()).thenReturn(formParams);
         when(context.getAuthenticationSession()).thenReturn(authSession);
         when(context.getAuthenticatorConfig()).thenReturn(null);
-        when(authSession.getAuthNote(OtpChannelChoiceAuthenticator.AUTH_NOTE_CHANNEL)).thenReturn("email");
-        when(authSession.getAuthNote(OtpChannelChoiceAuthenticator.AUTH_NOTE_CODE)).thenReturn("123456");
-        when(authSession.getAuthNote(OtpChannelChoiceAuthenticator.AUTH_NOTE_EXPIRY)).thenReturn(String.valueOf(Time.currentTime() + 300));
-        when(authSession.getAuthNote(OtpChannelChoiceAuthenticator.AUTH_NOTE_ATTEMPTS)).thenReturn("0");
+        stubStoredCode("email", "123456", 300, "0");
 
         authenticator.action(context);
 
@@ -240,10 +249,7 @@ class OtpChannelChoiceAuthenticatorTest {
         when(httpRequest.getDecodedFormParameters()).thenReturn(formParams);
         when(context.getAuthenticationSession()).thenReturn(authSession);
         when(context.getAuthenticatorConfig()).thenReturn(null);
-        when(authSession.getAuthNote(OtpChannelChoiceAuthenticator.AUTH_NOTE_CHANNEL)).thenReturn("sms");
-        when(authSession.getAuthNote(OtpChannelChoiceAuthenticator.AUTH_NOTE_CODE)).thenReturn("654321");
-        when(authSession.getAuthNote(OtpChannelChoiceAuthenticator.AUTH_NOTE_EXPIRY)).thenReturn(String.valueOf(Time.currentTime() + 300));
-        when(authSession.getAuthNote(OtpChannelChoiceAuthenticator.AUTH_NOTE_ATTEMPTS)).thenReturn("0");
+        stubStoredCode("sms", "654321", 300, "0");
 
         authenticator.action(context);
 
@@ -258,10 +264,7 @@ class OtpChannelChoiceAuthenticatorTest {
         when(httpRequest.getDecodedFormParameters()).thenReturn(formParams);
         when(context.getAuthenticationSession()).thenReturn(authSession);
         when(context.getAuthenticatorConfig()).thenReturn(null);
-        when(authSession.getAuthNote(OtpChannelChoiceAuthenticator.AUTH_NOTE_CHANNEL)).thenReturn("email");
-        when(authSession.getAuthNote(OtpChannelChoiceAuthenticator.AUTH_NOTE_CODE)).thenReturn("123456");
-        when(authSession.getAuthNote(OtpChannelChoiceAuthenticator.AUTH_NOTE_EXPIRY)).thenReturn(String.valueOf(Time.currentTime() + 300));
-        when(authSession.getAuthNote(OtpChannelChoiceAuthenticator.AUTH_NOTE_ATTEMPTS)).thenReturn("0");
+        stubStoredCode("email", "123456", 300, "0");
         when(context.form()).thenReturn(form);
         when(form.setAttribute(anyString(), any())).thenReturn(form);
         when(form.setError(anyString())).thenReturn(form);
@@ -300,10 +303,7 @@ class OtpChannelChoiceAuthenticatorTest {
         formParams.putSingle(OtpChannelChoiceAuthenticator.PARAM_OTP, "123456");
         when(context.getHttpRequest()).thenReturn(httpRequest);
         when(httpRequest.getDecodedFormParameters()).thenReturn(formParams);
-        when(authSession.getAuthNote(OtpChannelChoiceAuthenticator.AUTH_NOTE_CHANNEL)).thenReturn("email");
-        when(authSession.getAuthNote(OtpChannelChoiceAuthenticator.AUTH_NOTE_CODE)).thenReturn("123456");
-        when(authSession.getAuthNote(OtpChannelChoiceAuthenticator.AUTH_NOTE_EXPIRY)).thenReturn(String.valueOf(Time.currentTime() - 10));
-        when(authSession.getAuthNote(OtpChannelChoiceAuthenticator.AUTH_NOTE_ATTEMPTS)).thenReturn("0");
+        stubStoredCode("email", "123456", -10, "0");
         when(context.form()).thenReturn(form);
         when(form.setAttribute(anyString(), any())).thenReturn(form);
         when(form.setError(anyString())).thenReturn(form);
@@ -322,10 +322,7 @@ class OtpChannelChoiceAuthenticatorTest {
         formParams.putSingle(OtpChannelChoiceAuthenticator.PARAM_OTP, "123456");
         when(context.getHttpRequest()).thenReturn(httpRequest);
         when(httpRequest.getDecodedFormParameters()).thenReturn(formParams);
-        when(authSession.getAuthNote(OtpChannelChoiceAuthenticator.AUTH_NOTE_CHANNEL)).thenReturn("sms");
-        when(authSession.getAuthNote(OtpChannelChoiceAuthenticator.AUTH_NOTE_CODE)).thenReturn("123456");
-        when(authSession.getAuthNote(OtpChannelChoiceAuthenticator.AUTH_NOTE_EXPIRY)).thenReturn(String.valueOf(Time.currentTime() - 10));
-        when(authSession.getAuthNote(OtpChannelChoiceAuthenticator.AUTH_NOTE_ATTEMPTS)).thenReturn("0");
+        stubStoredCode("sms", "123456", -10, "0");
         when(context.form()).thenReturn(form);
         when(form.setAttribute(anyString(), any())).thenReturn(form);
         when(form.setError(anyString())).thenReturn(form);
@@ -345,10 +342,7 @@ class OtpChannelChoiceAuthenticatorTest {
         when(httpRequest.getDecodedFormParameters()).thenReturn(formParams);
         when(context.getAuthenticationSession()).thenReturn(authSession);
         when(context.getAuthenticatorConfig()).thenReturn(null);
-        when(authSession.getAuthNote(OtpChannelChoiceAuthenticator.AUTH_NOTE_CHANNEL)).thenReturn("sms");
-        when(authSession.getAuthNote(OtpChannelChoiceAuthenticator.AUTH_NOTE_CODE)).thenReturn("123456");
-        when(authSession.getAuthNote(OtpChannelChoiceAuthenticator.AUTH_NOTE_EXPIRY)).thenReturn(String.valueOf(Time.currentTime() + 300));
-        when(authSession.getAuthNote(OtpChannelChoiceAuthenticator.AUTH_NOTE_ATTEMPTS)).thenReturn("3");
+        stubStoredCode("sms", "123456", 300, "3");
         when(context.form()).thenReturn(form);
         when(form.setAttribute(anyString(), any())).thenReturn(form);
         when(form.setError(anyString())).thenReturn(form);
@@ -368,7 +362,8 @@ class OtpChannelChoiceAuthenticatorTest {
         when(httpRequest.getDecodedFormParameters()).thenReturn(formParams);
         when(context.getAuthenticationSession()).thenReturn(authSession);
         when(authSession.getAuthNote(OtpChannelChoiceAuthenticator.AUTH_NOTE_CHANNEL)).thenReturn("email");
-        when(authSession.getAuthNote(OtpChannelChoiceAuthenticator.AUTH_NOTE_CODE)).thenReturn(null);
+        when(authSession.getAuthNote(OtpChannelChoiceAuthenticator.AUTH_NOTE_CODE_HASH)).thenReturn(null);
+        when(authSession.getAuthNote(OtpChannelChoiceAuthenticator.AUTH_NOTE_CODE_SALT)).thenReturn(null);
         when(context.form()).thenReturn(form);
         when(form.setAttribute(anyString(), any())).thenReturn(form);
         when(form.createForm(OtpChannelChoiceAuthenticator.TEMPLATE_CHANNEL_SELECT)).thenReturn(formResponse);
@@ -398,12 +393,13 @@ class OtpChannelChoiceAuthenticatorTest {
         authenticator.action(context);
 
         // Old state should be cleared
-        verify(authSession).removeAuthNote(OtpChannelChoiceAuthenticator.AUTH_NOTE_CODE);
+        verify(authSession).removeAuthNote(OtpChannelChoiceAuthenticator.AUTH_NOTE_CODE_HASH);
+        verify(authSession).removeAuthNote(OtpChannelChoiceAuthenticator.AUTH_NOTE_CODE_SALT);
         verify(authSession).removeAuthNote(OtpChannelChoiceAuthenticator.AUTH_NOTE_EXPIRY);
         verify(authSession).removeAuthNote(OtpChannelChoiceAuthenticator.AUTH_NOTE_ATTEMPTS);
         // New channel should be set
         verify(authSession).setAuthNote(eq(OtpChannelChoiceAuthenticator.AUTH_NOTE_CHANNEL), eq("sms"));
-        verify(authSession).setAuthNote(eq(OtpChannelChoiceAuthenticator.AUTH_NOTE_CODE), anyString());
+        verify(authSession).setAuthNote(eq(OtpChannelChoiceAuthenticator.AUTH_NOTE_CODE_HASH), anyString());
         // SMS should be sent (not email)
         verify(smsProvider).send(eq("+1234567890"), anyString());
         verify(context).challenge(formResponse);
@@ -426,7 +422,8 @@ class OtpChannelChoiceAuthenticatorTest {
         authenticator.action(context);
 
         // Old state should be cleared and new code generated
-        verify(authSession).removeAuthNote(OtpChannelChoiceAuthenticator.AUTH_NOTE_CODE);
+        verify(authSession).removeAuthNote(OtpChannelChoiceAuthenticator.AUTH_NOTE_CODE_HASH);
+        verify(authSession).removeAuthNote(OtpChannelChoiceAuthenticator.AUTH_NOTE_CODE_SALT);
         verify(authSession).removeAuthNote(OtpChannelChoiceAuthenticator.AUTH_NOTE_EXPIRY);
         verify(authSession).removeAuthNote(OtpChannelChoiceAuthenticator.AUTH_NOTE_ATTEMPTS);
         verify(authSession).setAuthNote(eq(OtpChannelChoiceAuthenticator.AUTH_NOTE_CHANNEL), eq("email"));
@@ -474,7 +471,7 @@ class OtpChannelChoiceAuthenticatorTest {
         authenticator.action(context);
 
         verify(emailProvider, never()).send(anyString(), anyString(), any());
-        verify(authSession, never()).setAuthNote(eq(OtpChannelChoiceAuthenticator.AUTH_NOTE_CODE), anyString());
+        verify(authSession, never()).setAuthNote(eq(OtpChannelChoiceAuthenticator.AUTH_NOTE_CODE_HASH), anyString());
         verify(context).challenge(formResponse);
     }
 
@@ -494,7 +491,7 @@ class OtpChannelChoiceAuthenticatorTest {
         authenticator.action(context);
 
         verify(smsProvider).send(eq("+1234567890"), anyString());
-        verify(authSession).setAuthNote(eq(OtpChannelChoiceAuthenticator.AUTH_NOTE_CODE), anyString());
+        verify(authSession).setAuthNote(eq(OtpChannelChoiceAuthenticator.AUTH_NOTE_CODE_HASH), anyString());
         verify(context).challenge(formResponse);
     }
 
@@ -519,7 +516,9 @@ class OtpChannelChoiceAuthenticatorTest {
     }
 
     @Test
-    void action_selectEmailWithCustomConfig_usesConfiguredCodeLength() throws Exception {
+    void action_selectEmailWithCustomConfig_honorsLengthAndTtl() throws Exception {
+        // With hashed storage we can't observe the underlying code length directly. The TTL
+        // however is reflected in AUTH_NOTE_EXPIRY = now + 600.
         setupCommonMocks();
         Map<String, String> config = new HashMap<>();
         config.put(OtpChannelChoiceConst.CONFIG_CODE_LENGTH, "8");
@@ -536,9 +535,13 @@ class OtpChannelChoiceAuthenticatorTest {
 
         authenticator.action(context);
 
-        ArgumentCaptor<String> codeCaptor = ArgumentCaptor.forClass(String.class);
-        verify(authSession).setAuthNote(eq(OtpChannelChoiceAuthenticator.AUTH_NOTE_CODE), codeCaptor.capture());
-        assertThat(codeCaptor.getValue().length(), equalTo(8));
+        verify(authSession).setAuthNote(eq(OtpChannelChoiceAuthenticator.AUTH_NOTE_CODE_HASH), anyString());
+        verify(authSession).setAuthNote(eq(OtpChannelChoiceAuthenticator.AUTH_NOTE_CODE_SALT), anyString());
+        ArgumentCaptor<String> expiryCaptor = ArgumentCaptor.forClass(String.class);
+        verify(authSession).setAuthNote(eq(OtpChannelChoiceAuthenticator.AUTH_NOTE_EXPIRY), expiryCaptor.capture());
+        int expiry = Integer.parseInt(expiryCaptor.getValue());
+        int now = Time.currentTime();
+        assertThat(expiry >= now + 595 && expiry <= now + 605, equalTo(true));
     }
 
     // --- configuredFor / requiresUser ---
@@ -549,13 +552,15 @@ class OtpChannelChoiceAuthenticatorTest {
     }
 
     @Test
-    void configuredFor_userWithEmail_returnsTrue() {
+    void configuredFor_userWithVerifiedEmail_returnsTrue() {
         when(user.getEmail()).thenReturn("test@example.com");
+        when(user.isEmailVerified()).thenReturn(true);
         assertThat(authenticator.configuredFor(session, realm, user), equalTo(true));
     }
 
     @Test
     void configuredFor_userWithPhone_returnsTrue() {
+        // SMS is usable when phone attribute is present; verified-phone gate is off by default.
         when(user.getEmail()).thenReturn(null);
         when(user.getFirstAttribute(SmsOtpConst.DEFAULT_PHONE_ATTRIBUTE)).thenReturn("+1234567890");
         assertThat(authenticator.configuredFor(session, realm, user), equalTo(true));
@@ -564,6 +569,15 @@ class OtpChannelChoiceAuthenticatorTest {
     @Test
     void configuredFor_userWithNeither_returnsFalse() {
         when(user.getEmail()).thenReturn(null);
+        when(user.getFirstAttribute(SmsOtpConst.DEFAULT_PHONE_ATTRIBUTE)).thenReturn(null);
+        assertThat(authenticator.configuredFor(session, realm, user), equalTo(false));
+    }
+
+    @Test
+    void configuredFor_userWithUnverifiedEmailAndNoPhone_returnsFalse() {
+        // SEC-003: unverified email is rejected by default, and no phone means SMS path is out too.
+        when(user.getEmail()).thenReturn("test@example.com");
+        when(user.isEmailVerified()).thenReturn(false);
         when(user.getFirstAttribute(SmsOtpConst.DEFAULT_PHONE_ATTRIBUTE)).thenReturn(null);
         assertThat(authenticator.configuredFor(session, realm, user), equalTo(false));
     }

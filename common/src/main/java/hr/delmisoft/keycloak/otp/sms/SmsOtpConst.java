@@ -1,8 +1,24 @@
 package hr.delmisoft.keycloak.otp.sms;
 
+import org.keycloak.models.RealmModel;
+
 public final class SmsOtpConst {
 
     private SmsOtpConst() {}
+
+    /**
+     * Resolves the user attribute that stores the phone number to send the OTP to.
+     * Reads the realm-level {@code smsOtp.phoneAttribute} setting, falling back to
+     * {@link #DEFAULT_PHONE_ATTRIBUTE}. Keeps "is the user eligible?" and "where do we
+     * send?" consistent across the browser and grant flows.
+     */
+    public static String resolvePhoneAttribute(RealmModel realm) {
+        String configured = realm.getAttribute(CONFIG_PHONE_ATTRIBUTE);
+        if (configured == null || configured.isBlank()) {
+            return DEFAULT_PHONE_ATTRIBUTE;
+        }
+        return configured;
+    }
 
     // Provider IDs
     public static final String BROWSER_PROVIDER_ID = "sms-otp-form";
@@ -13,6 +29,8 @@ public final class SmsOtpConst {
     public static final String CONFIG_MAX_RETRIES = "smsOtp.maxRetries";
     public static final String CONFIG_PHONE_ATTRIBUTE = "smsOtp.phoneAttribute";
     public static final String CONFIG_SEND_COOLDOWN = "smsOtp.sendCooldown";
+    public static final String CONFIG_REQUIRE_VERIFIED_PHONE = "smsOtp.requireVerifiedPhone";
+    public static final String CONFIG_VERIFIED_PHONE_ATTRIBUTE = "smsOtp.verifiedPhoneAttribute";
 
     // Defaults
     public static final int DEFAULT_CODE_LENGTH = 6;
@@ -20,15 +38,19 @@ public final class SmsOtpConst {
     public static final int DEFAULT_MAX_RETRIES = 3;
     public static final int DEFAULT_SEND_COOLDOWN = 60;
     public static final String DEFAULT_PHONE_ATTRIBUTE = "phoneNumber";
+    public static final boolean DEFAULT_REQUIRE_VERIFIED_PHONE = false;
+    public static final String DEFAULT_VERIFIED_PHONE_ATTRIBUTE = "phoneNumberVerified";
 
     // Auth session note keys (browser flow)
-    public static final String AUTH_NOTE_CODE = "smsOtpCode";
+    public static final String AUTH_NOTE_CODE_HASH = "smsOtpCodeHash";
+    public static final String AUTH_NOTE_CODE_SALT = "smsOtpCodeSalt";
     public static final String AUTH_NOTE_EXPIRY = "smsOtpExpiry";
     public static final String AUTH_NOTE_ATTEMPTS = "smsOtpAttempts";
     public static final String AUTH_NOTE_LAST_SENT = "smsOtpLastSent";
 
     // SingleUseObject note keys (direct grant)
-    public static final String NOTE_CODE = "code";
+    public static final String NOTE_CODE_HASH = "codeHash";
+    public static final String NOTE_CODE_SALT = "codeSalt";
     public static final String NOTE_USER_ID = "userId";
     public static final String NOTE_ATTEMPTS = "attempts";
 

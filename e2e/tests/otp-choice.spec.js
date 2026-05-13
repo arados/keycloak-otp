@@ -134,6 +134,11 @@ test.describe('OTP channel selection (Email vs SMS)', () => {
   });
 
   test('should allow switching channel after browser back (SMS → Email)', async ({ page, context }) => {
+    // The previous test sent an email, so the per-(realm, user, email) cooldown may still be
+    // active when this test's email click hits the server. Wait past the demo realm's 2s
+    // cooldown so the helper's Mailpit poll observes a fresh email rather than timing out.
+    await page.waitForTimeout(2500);
+
     await context.clearCookies();
     await clearMailpit(page);
 
@@ -165,6 +170,10 @@ test.describe('OTP channel selection (Email vs SMS)', () => {
   });
 
   test('should allow switching channel after browser back (Email → SMS)', async ({ page, context }) => {
+    // Wait past the email cooldown set by the previous test so this test's email click
+    // gets a fresh send (the helper polls Mailpit, which doesn't see the throttle-stashed code).
+    await page.waitForTimeout(2500);
+
     await context.clearCookies();
     await clearMailpit(page);
 

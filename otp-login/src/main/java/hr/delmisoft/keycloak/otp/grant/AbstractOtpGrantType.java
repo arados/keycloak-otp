@@ -1,7 +1,5 @@
 package hr.delmisoft.keycloak.otp.grant;
 
-import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
 import java.security.SecureRandom;
 import java.util.HashMap;
 import java.util.Map;
@@ -12,6 +10,7 @@ import jakarta.ws.rs.core.Response;
 
 import org.keycloak.OAuthErrorException;
 import org.keycloak.authentication.AuthenticationProcessor;
+import org.keycloak.common.util.Time;
 import org.keycloak.events.Details;
 import org.keycloak.events.Errors;
 import org.keycloak.events.EventType;
@@ -33,19 +32,26 @@ import org.keycloak.sessions.RootAuthenticationSessionModel;
 
 import org.jboss.logging.Logger;
 
+import hr.delmisoft.keycloak.otp.OtpHash;
 import hr.delmisoft.keycloak.otp.OtpSendThrottle;
 
 /**
  * Base class for OTP-based custom OAuth2 grant types.
  * Handles two-phase OTP flow: request OTP → verify OTP → issue tokens.
  * Password validation is optional — if the password parameter is present, it is validated.
+ *
+ * <p>The phase-1 response shape for unknown/disabled/unverified users is identical to the
+ * success path so the public token endpoint is not an account-enumeration oracle. A fake
+ * (never-stored) {@code otp_session_id} is returned in those cases; phase 2 with that id
+ * fails with the same generic response a real-but-wrong attempt would produce.
  */
 public abstract class AbstractOtpGrantType extends OAuth2GrantTypeBase {
 
     private static final Logger LOG = Logger.getLogger(AbstractOtpGrantType.class);
     private static final SecureRandom RANDOM = new SecureRandom();
 
-    static final String NOTE_CODE = "code";
+    static final String NOTE_CODE_HASH = "codeHash";
+    static final String NOTE_CODE_SALT = "codeSalt";
     static final String NOTE_USER_ID = "userId";
     static final String NOTE_CLIENT_ID = "clientId";
     static final String NOTE_ATTEMPTS = "attempts";
@@ -83,16 +89,18 @@ public abstract class AbstractOtpGrantType extends OAuth2GrantTypeBase {
                     "Missing parameter: username", Response.Status.BAD_REQUEST);
         }
 
+        String otp = formParams.getFirst("otp");
+        String otpSessionId = formParams.getFirst("otp_session_id");
+        boolean isPhase2 = otp != null && !otp.isBlank();
+
         UserModel user = lookupUser(username);
-        // Normalize unknown/disabled accounts to the same response to avoid account-state
-        // enumeration via the public token endpoint.
-        if (user == null) {
-            event.error(Errors.USER_NOT_FOUND);
-            throw invalidCredentials();
-        }
-        if (!user.isEnabled()) {
-            event.error(Errors.USER_DISABLED);
-            throw invalidCredentials();
+
+        // Unknown / disabled users get the same response shape as a valid phase-1 send so the
+        // public endpoint does not leak account existence. Phase 2 against the fake session id
+        // returns the generic invalid_grant the wrong-OTP path produces.
+        if (user == null || !user.isEnabled()) {
+            event.error(user == null ? Errors.USER_NOT_FOUND : Errors.USER_DISABLED);
+            return isPhase2 ? indistinguishablePhase2Response() : indistinguishablePhase1Response();
         }
 
         event.user(user);
@@ -105,6 +113,13 @@ public abstract class AbstractOtpGrantType extends OAuth2GrantTypeBase {
                 event.error(Errors.USER_TEMPORARILY_DISABLED);
                 throw invalidCredentials();
             }
+        }
+
+        // Channel verification gate. For email, default-on uses Keycloak's native verified flag.
+        // For SMS there is no standard, so the gate is off unless an admin opts in.
+        if (!isChannelVerified(user)) {
+            event.error(Errors.INVALID_USER_CREDENTIALS);
+            return isPhase2 ? indistinguishablePhase2Response() : indistinguishablePhase1Response();
         }
 
         // Validate password if provided
@@ -125,11 +140,7 @@ public abstract class AbstractOtpGrantType extends OAuth2GrantTypeBase {
                     "Account is not fully set up", Response.Status.BAD_REQUEST);
         }
 
-        // Check if this is phase 2 (OTP submission)
-        String otp = formParams.getFirst("otp");
-        String otpSessionId = formParams.getFirst("otp_session_id");
-
-        if (otp == null || otp.isBlank()) {
+        if (!isPhase2) {
             return handlePhase1(user);
         } else {
             return handlePhase2(user, otp, otpSessionId, scope);
@@ -139,6 +150,37 @@ public abstract class AbstractOtpGrantType extends OAuth2GrantTypeBase {
     private CorsErrorResponseException invalidCredentials() {
         return new CorsErrorResponseException(cors, OAuthErrorException.INVALID_GRANT,
                 GENERIC_INVALID_CREDENTIALS, Response.Status.UNAUTHORIZED);
+    }
+
+    /**
+     * Phase-1 shape returned for unknown/disabled/unverified accounts. Looks exactly like
+     * the success response — including a syntactically valid {@code otp_session_id} — but
+     * no OTP is generated or sent and no session is created. The id will never resolve in
+     * phase 2.
+     */
+    private Response indistinguishablePhase1Response() {
+        Map<String, Object> body = new HashMap<>();
+        body.put("error", getOtpRequiredError());
+        body.put("error_description", getOtpSentDescription());
+        body.put("otp_session_id", UUID.randomUUID().toString());
+        cors.add();
+        return Response.status(Response.Status.UNAUTHORIZED)
+                .entity(body)
+                .type(MediaType.APPLICATION_JSON_TYPE)
+                .build();
+    }
+
+    private Response indistinguishablePhase2Response() {
+        // Use the same shape as the real "OTP session has expired" branch so observers cannot
+        // distinguish a fake session id from a real-but-expired one.
+        Map<String, Object> body = new HashMap<>();
+        body.put("error", getSessionExpiredError());
+        body.put("error_description", "OTP session has expired");
+        cors.add();
+        return Response.status(Response.Status.UNAUTHORIZED)
+                .entity(body)
+                .type(MediaType.APPLICATION_JSON_TYPE)
+                .build();
     }
 
     private void recordBruteForceFailure(UserModel user) {
@@ -156,7 +198,13 @@ public abstract class AbstractOtpGrantType extends OAuth2GrantTypeBase {
      */
     private Response handlePhase1(UserModel user) {
         int cooldown = resolveCooldown();
-        if (!OtpSendThrottle.tryReserve(session, realm, user, getChannel(), cooldown)) {
+        String code = generateCode(DEFAULT_CODE_LENGTH);
+        String salt = OtpHash.newSalt();
+        String hash = OtpHash.hash(code, salt);
+        int codeExpiresAt = (int) (Time.currentTime() + DEFAULT_TTL);
+
+        if (!OtpSendThrottle.tryReserveWithCodeHash(session, realm, user, getChannel(), cooldown,
+                hash, salt, codeExpiresAt)) {
             int retryAfter = OtpSendThrottle.remainingSeconds(session, realm, user, getChannel());
             event.error(Errors.NOT_ALLOWED);
             Map<String, Object> body = new HashMap<>();
@@ -171,11 +219,11 @@ public abstract class AbstractOtpGrantType extends OAuth2GrantTypeBase {
                     .build();
         }
 
-        String code = generateCode(DEFAULT_CODE_LENGTH);
         String sessionId = UUID.randomUUID().toString();
 
         Map<String, String> notes = new HashMap<>();
-        notes.put(NOTE_CODE, code);
+        notes.put(NOTE_CODE_HASH, hash);
+        notes.put(NOTE_CODE_SALT, salt);
         notes.put(NOTE_USER_ID, user.getId());
         notes.put(NOTE_CLIENT_ID, client.getClientId());
         notes.put(NOTE_ATTEMPTS, "0");
@@ -187,7 +235,10 @@ public abstract class AbstractOtpGrantType extends OAuth2GrantTypeBase {
             sendOtp(user, code);
         } catch (Exception e) {
             LOG.error("Failed to send OTP", e);
+            // Roll back so a transient delivery error doesn't lock the user out of retries
+            // by leaving a cooldown protecting an OTP that was never received.
             store.remove(sessionId);
+            OtpSendThrottle.release(session, realm, user, getChannel());
             event.error(Errors.EMAIL_SEND_FAILED);
             throw new CorsErrorResponseException(cors, "otp_send_failed",
                     "Failed to send OTP", Response.Status.INTERNAL_SERVER_ERROR);
@@ -207,7 +258,8 @@ public abstract class AbstractOtpGrantType extends OAuth2GrantTypeBase {
 
     /**
      * Resolves the send cooldown (seconds) from the realm attribute {@code otp.sendCooldown},
-     * falling back to {@link OtpSendThrottle#DEFAULT_SEND_COOLDOWN}.
+     * falling back to {@link OtpSendThrottle#DEFAULT_SEND_COOLDOWN}. Accepts {@code 0} to
+     * disable throttling, matching the documented behavior.
      */
     private int resolveCooldown() {
         String configured = realm.getAttribute(OtpSendThrottle.CONFIG_SEND_COOLDOWN);
@@ -253,8 +305,7 @@ public abstract class AbstractOtpGrantType extends OAuth2GrantTypeBase {
         }
 
         // Verify client binding — refuse to redeem an OTP session against a different client
-        // than the one that initiated phase 1. Pre-1.1.0 sessions without a clientId note
-        // also count as invalid here, since they predate this binding.
+        // than the one that initiated phase 1.
         String storedClientId = notes.get(NOTE_CLIENT_ID);
         if (storedClientId == null || !storedClientId.equals(client.getClientId())) {
             store.remove(otpSessionId);
@@ -280,16 +331,17 @@ public abstract class AbstractOtpGrantType extends OAuth2GrantTypeBase {
                     "Too many failed attempts", Response.Status.UNAUTHORIZED);
         }
 
-        // Validate code
-        String storedCode = notes.get(NOTE_CODE);
-        if (storedCode == null) {
+        // Validate code (hashed)
+        String storedHash = notes.get(NOTE_CODE_HASH);
+        String storedSalt = notes.get(NOTE_CODE_SALT);
+        if (storedHash == null || storedSalt == null) {
             store.remove(otpSessionId);
             event.error(Errors.INVALID_USER_CREDENTIALS);
             throw new CorsErrorResponseException(cors, getSessionExpiredError(),
                     "OTP session is corrupt", Response.Status.UNAUTHORIZED);
         }
 
-        if (!MessageDigest.isEqual(storedCode.getBytes(StandardCharsets.UTF_8), otp.getBytes(StandardCharsets.UTF_8))) {
+        if (!OtpHash.verify(otp, storedHash, storedSalt)) {
             notes.put(NOTE_ATTEMPTS, String.valueOf(attempts + 1));
             store.replace(otpSessionId, notes);
             recordBruteForceFailure(user);
@@ -377,4 +429,12 @@ public abstract class AbstractOtpGrantType extends OAuth2GrantTypeBase {
 
     /** Throttle channel name (e.g. {@code "email"} or {@code "sms"}). */
     protected abstract String getChannel();
+
+    /**
+     * Verifies that the user's destination channel is trusted enough to use as an
+     * authentication factor (e.g. {@code emailVerified} for email; a configurable verified-
+     * phone attribute for SMS). Returning {@code false} causes the grant to respond as if
+     * the account did not exist.
+     */
+    protected abstract boolean isChannelVerified(UserModel user);
 }

@@ -1,7 +1,5 @@
 package hr.delmisoft.keycloak.otp.sms;
 
-import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
 import java.security.SecureRandom;
 
 import org.keycloak.authentication.AuthenticationFlowContext;
@@ -14,6 +12,7 @@ import org.keycloak.models.RealmModel;
 import org.keycloak.models.UserModel;
 import org.keycloak.sessions.AuthenticationSessionModel;
 
+import hr.delmisoft.keycloak.otp.OtpHash;
 import hr.delmisoft.keycloak.otp.OtpSendThrottle;
 
 public class SmsOtpAuthenticator implements Authenticator {
@@ -23,10 +22,11 @@ public class SmsOtpAuthenticator implements Authenticator {
     @Override
     public void authenticate(AuthenticationFlowContext context) {
         AuthenticationSessionModel authSession = context.getAuthenticationSession();
-        String existingCode = authSession.getAuthNote(SmsOtpConst.AUTH_NOTE_CODE);
+        String storedHash = authSession.getAuthNote(SmsOtpConst.AUTH_NOTE_CODE_HASH);
+        String storedSalt = authSession.getAuthNote(SmsOtpConst.AUTH_NOTE_CODE_SALT);
         String expiryStr = authSession.getAuthNote(SmsOtpConst.AUTH_NOTE_EXPIRY);
 
-        if (existingCode != null && expiryStr != null) {
+        if (storedHash != null && storedSalt != null && expiryStr != null) {
             try {
                 if (Time.currentTime() < Integer.parseInt(expiryStr)) {
                     challengeOtpForm(context);
@@ -39,14 +39,14 @@ public class SmsOtpAuthenticator implements Authenticator {
 
         // All sends — including the first send for a fresh auth session — honor the
         // per-(realm, user, channel) cooldown to prevent OTP spam via rapid session restarts.
-        sendCode(context, /* honourThrottle= */ true);
+        sendCode(context);
     }
 
     @Override
     public void action(AuthenticationFlowContext context) {
         String resendParam = context.getHttpRequest().getDecodedFormParameters().getFirst(SmsOtpConst.PARAM_RESEND);
         if ("true".equalsIgnoreCase(resendParam)) {
-            sendCode(context, /* honourThrottle= */ true);
+            sendCode(context);
             return;
         }
 
@@ -58,12 +58,13 @@ public class SmsOtpAuthenticator implements Authenticator {
         }
 
         AuthenticationSessionModel authSession = context.getAuthenticationSession();
-        String storedCode = authSession.getAuthNote(SmsOtpConst.AUTH_NOTE_CODE);
+        String storedHash = authSession.getAuthNote(SmsOtpConst.AUTH_NOTE_CODE_HASH);
+        String storedSalt = authSession.getAuthNote(SmsOtpConst.AUTH_NOTE_CODE_SALT);
         String expiryStr = authSession.getAuthNote(SmsOtpConst.AUTH_NOTE_EXPIRY);
         String attemptsStr = authSession.getAuthNote(SmsOtpConst.AUTH_NOTE_ATTEMPTS);
 
-        if (storedCode == null || expiryStr == null || attemptsStr == null) {
-            sendCode(context, /* honourThrottle= */ true);
+        if (storedHash == null || storedSalt == null || expiryStr == null || attemptsStr == null) {
+            sendCode(context);
             return;
         }
 
@@ -73,7 +74,7 @@ public class SmsOtpAuthenticator implements Authenticator {
             expiry = Integer.parseInt(expiryStr);
             attempts = Integer.parseInt(attemptsStr);
         } catch (NumberFormatException e) {
-            sendCode(context, /* honourThrottle= */ true);
+            sendCode(context);
             return;
         }
         int maxRetries = getConfigInt(context, SmsOtpConst.CONFIG_MAX_RETRIES, SmsOtpConst.DEFAULT_MAX_RETRIES);
@@ -89,7 +90,7 @@ public class SmsOtpAuthenticator implements Authenticator {
             return;
         }
 
-        if (MessageDigest.isEqual(storedCode.getBytes(StandardCharsets.UTF_8), enteredOtp.getBytes(StandardCharsets.UTF_8))) {
+        if (OtpHash.verify(enteredOtp, storedHash, storedSalt)) {
             context.success();
         } else {
             authSession.setAuthNote(SmsOtpConst.AUTH_NOTE_ATTEMPTS, String.valueOf(attempts + 1));
@@ -105,8 +106,15 @@ public class SmsOtpAuthenticator implements Authenticator {
 
     @Override
     public boolean configuredFor(KeycloakSession session, RealmModel realm, UserModel user) {
-        String phoneAttr = SmsOtpConst.DEFAULT_PHONE_ATTRIBUTE;
-        return user.getFirstAttribute(phoneAttr) != null;
+        String phoneAttr = resolvePhoneAttribute(realm);
+        if (user.getFirstAttribute(phoneAttr) == null) {
+            return false;
+        }
+        if (requireVerifiedPhone(realm)) {
+            String verifiedAttr = resolveVerifiedPhoneAttribute(realm);
+            return "true".equalsIgnoreCase(user.getFirstAttribute(verifiedAttr));
+        }
+        return true;
     }
 
     @Override
@@ -117,29 +125,47 @@ public class SmsOtpAuthenticator implements Authenticator {
     public void close() {
     }
 
-    private void sendCode(AuthenticationFlowContext context, boolean honourThrottle) {
-        int cooldown = getConfigInt(context, SmsOtpConst.CONFIG_SEND_COOLDOWN, SmsOtpConst.DEFAULT_SEND_COOLDOWN);
-        if (honourThrottle && !OtpSendThrottle.tryReserve(context.getSession(), context.getRealm(), context.getUser(),
-                OtpSendThrottle.CHANNEL_SMS, cooldown)) {
-            challengeOtpForm(context);
-            return;
-        }
-        if (!honourThrottle) {
-            OtpSendThrottle.tryReserve(context.getSession(), context.getRealm(), context.getUser(),
-                    OtpSendThrottle.CHANNEL_SMS, cooldown);
-        }
-
+    private void sendCode(AuthenticationFlowContext context) {
+        int cooldown = getCooldownConfig(context);
         int codeLength = getConfigInt(context, SmsOtpConst.CONFIG_CODE_LENGTH, SmsOtpConst.DEFAULT_CODE_LENGTH);
         int ttl = getConfigInt(context, SmsOtpConst.CONFIG_TTL, SmsOtpConst.DEFAULT_TTL);
         String code = generateCode(codeLength);
+        String salt = OtpHash.newSalt();
+        String hash = OtpHash.hash(code, salt);
+        int codeExpiresAt = Time.currentTime() + ttl;
+
+        boolean reserved = OtpSendThrottle.tryReserveWithCodeHash(context.getSession(), context.getRealm(),
+                context.getUser(), OtpSendThrottle.CHANNEL_SMS, cooldown, hash, salt, codeExpiresAt);
+
+        if (!reserved) {
+            AuthenticationSessionModel authSession = context.getAuthenticationSession();
+            OtpSendThrottle.RecentCode recent = OtpSendThrottle.getRecentCode(context.getSession(),
+                    context.getRealm(), context.getUser(), OtpSendThrottle.CHANNEL_SMS);
+            if (recent != null) {
+                authSession.setAuthNote(SmsOtpConst.AUTH_NOTE_CODE_HASH, recent.codeHash);
+                authSession.setAuthNote(SmsOtpConst.AUTH_NOTE_CODE_SALT, recent.codeSalt);
+                authSession.setAuthNote(SmsOtpConst.AUTH_NOTE_EXPIRY, String.valueOf(recent.expiresAt));
+                authSession.setAuthNote(SmsOtpConst.AUTH_NOTE_ATTEMPTS, "0");
+            }
+            challengeOtpForm(context);
+            return;
+        }
 
         AuthenticationSessionModel authSession = context.getAuthenticationSession();
-        authSession.setAuthNote(SmsOtpConst.AUTH_NOTE_CODE, code);
-        authSession.setAuthNote(SmsOtpConst.AUTH_NOTE_EXPIRY, String.valueOf(Time.currentTime() + ttl));
+        authSession.setAuthNote(SmsOtpConst.AUTH_NOTE_CODE_HASH, hash);
+        authSession.setAuthNote(SmsOtpConst.AUTH_NOTE_CODE_SALT, salt);
+        authSession.setAuthNote(SmsOtpConst.AUTH_NOTE_EXPIRY, String.valueOf(codeExpiresAt));
         authSession.setAuthNote(SmsOtpConst.AUTH_NOTE_ATTEMPTS, "0");
         authSession.setAuthNote(SmsOtpConst.AUTH_NOTE_LAST_SENT, String.valueOf(Time.currentTime()));
 
         if (!sendSms(context, code)) {
+            OtpSendThrottle.release(context.getSession(), context.getRealm(), context.getUser(),
+                    OtpSendThrottle.CHANNEL_SMS);
+            authSession.removeAuthNote(SmsOtpConst.AUTH_NOTE_CODE_HASH);
+            authSession.removeAuthNote(SmsOtpConst.AUTH_NOTE_CODE_SALT);
+            authSession.removeAuthNote(SmsOtpConst.AUTH_NOTE_EXPIRY);
+            authSession.removeAuthNote(SmsOtpConst.AUTH_NOTE_ATTEMPTS);
+            authSession.removeAuthNote(SmsOtpConst.AUTH_NOTE_LAST_SENT);
             return;
         }
 
@@ -147,19 +173,32 @@ public class SmsOtpAuthenticator implements Authenticator {
     }
 
     private void sendNewCodeOnExpiry(AuthenticationFlowContext context) {
-        int cooldown = getConfigInt(context, SmsOtpConst.CONFIG_SEND_COOLDOWN, SmsOtpConst.DEFAULT_SEND_COOLDOWN);
-        boolean reserved = OtpSendThrottle.tryReserve(context.getSession(), context.getRealm(), context.getUser(),
-                OtpSendThrottle.CHANNEL_SMS, cooldown);
+        int cooldown = getCooldownConfig(context);
+        int codeLength = getConfigInt(context, SmsOtpConst.CONFIG_CODE_LENGTH, SmsOtpConst.DEFAULT_CODE_LENGTH);
+        int ttl = getConfigInt(context, SmsOtpConst.CONFIG_TTL, SmsOtpConst.DEFAULT_TTL);
+        String newCode = generateCode(codeLength);
+        String salt = OtpHash.newSalt();
+        String hash = OtpHash.hash(newCode, salt);
+        int codeExpiresAt = Time.currentTime() + ttl;
+        boolean reserved = OtpSendThrottle.tryReserveWithCodeHash(context.getSession(), context.getRealm(),
+                context.getUser(), OtpSendThrottle.CHANNEL_SMS, cooldown, hash, salt, codeExpiresAt);
         if (reserved) {
-            int codeLength = getConfigInt(context, SmsOtpConst.CONFIG_CODE_LENGTH, SmsOtpConst.DEFAULT_CODE_LENGTH);
-            int ttl = getConfigInt(context, SmsOtpConst.CONFIG_TTL, SmsOtpConst.DEFAULT_TTL);
-            String newCode = generateCode(codeLength);
             AuthenticationSessionModel authSession = context.getAuthenticationSession();
-            authSession.setAuthNote(SmsOtpConst.AUTH_NOTE_CODE, newCode);
-            authSession.setAuthNote(SmsOtpConst.AUTH_NOTE_EXPIRY, String.valueOf(Time.currentTime() + ttl));
+            authSession.setAuthNote(SmsOtpConst.AUTH_NOTE_CODE_HASH, hash);
+            authSession.setAuthNote(SmsOtpConst.AUTH_NOTE_CODE_SALT, salt);
+            authSession.setAuthNote(SmsOtpConst.AUTH_NOTE_EXPIRY, String.valueOf(codeExpiresAt));
             authSession.setAuthNote(SmsOtpConst.AUTH_NOTE_ATTEMPTS, "0");
             authSession.setAuthNote(SmsOtpConst.AUTH_NOTE_LAST_SENT, String.valueOf(Time.currentTime()));
-            sendSms(context, newCode);
+            if (!sendSms(context, newCode)) {
+                OtpSendThrottle.release(context.getSession(), context.getRealm(), context.getUser(),
+                        OtpSendThrottle.CHANNEL_SMS);
+                authSession.removeAuthNote(SmsOtpConst.AUTH_NOTE_CODE_HASH);
+                authSession.removeAuthNote(SmsOtpConst.AUTH_NOTE_CODE_SALT);
+                authSession.removeAuthNote(SmsOtpConst.AUTH_NOTE_EXPIRY);
+                authSession.removeAuthNote(SmsOtpConst.AUTH_NOTE_ATTEMPTS);
+                authSession.removeAuthNote(SmsOtpConst.AUTH_NOTE_LAST_SENT);
+                return;
+            }
         }
         context.failureChallenge(AuthenticationFlowError.EXPIRED_CODE,
                 context.form()
@@ -180,7 +219,8 @@ public class SmsOtpAuthenticator implements Authenticator {
     }
 
     private boolean sendSms(AuthenticationFlowContext context, String code) {
-        String phoneAttr = getConfigString(context, SmsOtpConst.CONFIG_PHONE_ATTRIBUTE, SmsOtpConst.DEFAULT_PHONE_ATTRIBUTE);
+        String phoneAttr = getConfigString(context, SmsOtpConst.CONFIG_PHONE_ATTRIBUTE,
+                resolvePhoneAttribute(context.getRealm()));
         String phoneNumber = context.getUser().getFirstAttribute(phoneAttr);
         if (phoneNumber == null || phoneNumber.isBlank()) {
             context.failureChallenge(AuthenticationFlowError.INTERNAL_ERROR,
@@ -229,5 +269,47 @@ public class SmsOtpAuthenticator implements Authenticator {
         }
         String value = config.getConfig().get(key);
         return (value == null || value.isBlank()) ? defaultValue : value;
+    }
+
+    /**
+     * Cooldown reads accept {@code 0} (disable throttling) as documented; values below 0
+     * fall back to the default.
+     */
+    private static int getCooldownConfig(AuthenticationFlowContext context) {
+        AuthenticatorConfigModel config = context.getAuthenticatorConfig();
+        if (config != null && config.getConfig() != null) {
+            String value = config.getConfig().get(SmsOtpConst.CONFIG_SEND_COOLDOWN);
+            if (value != null && !value.isBlank()) {
+                try {
+                    int parsed = Integer.parseInt(value);
+                    if (parsed >= 0) {
+                        return parsed;
+                    }
+                } catch (NumberFormatException ignored) {
+                    // fall through
+                }
+            }
+        }
+        return SmsOtpConst.DEFAULT_SEND_COOLDOWN;
+    }
+
+    private String resolvePhoneAttribute(RealmModel realm) {
+        return SmsOtpConst.resolvePhoneAttribute(realm);
+    }
+
+    private static boolean requireVerifiedPhone(RealmModel realm) {
+        String configured = realm.getAttribute(SmsOtpConst.CONFIG_REQUIRE_VERIFIED_PHONE);
+        if (configured == null || configured.isBlank()) {
+            return SmsOtpConst.DEFAULT_REQUIRE_VERIFIED_PHONE;
+        }
+        return Boolean.parseBoolean(configured);
+    }
+
+    private static String resolveVerifiedPhoneAttribute(RealmModel realm) {
+        String configured = realm.getAttribute(SmsOtpConst.CONFIG_VERIFIED_PHONE_ATTRIBUTE);
+        if (configured == null || configured.isBlank()) {
+            return SmsOtpConst.DEFAULT_VERIFIED_PHONE_ATTRIBUTE;
+        }
+        return configured;
     }
 }

@@ -140,6 +140,19 @@ Both the browser-flow authenticators and the grant types throttle OTP sends per 
   }
   ```
 
+### Channel verification (security)
+
+Before issuing an OTP, the plugin checks that the destination channel is trusted. The checks default to safe-by-default for email; SMS verification has no Keycloak-native equivalent so it is opt-in.
+
+| Realm attribute | Default | Effect |
+|---|---|---|
+| `emailOtp.requireVerifiedEmail` | `true` | Refuse Email OTP for users whose `emailVerified` is `false`. |
+| `smsOtp.requireVerifiedPhone` | `false` | When `true`, refuse SMS OTP unless the user's `smsOtp.verifiedPhoneAttribute` attribute is `"true"`. |
+| `smsOtp.verifiedPhoneAttribute` | `phoneNumberVerified` | User attribute name that gates SMS when `requireVerifiedPhone` is enabled. |
+| `smsOtp.phoneAttribute` | `phoneNumber` | User attribute holding the phone number. Used by both the browser flow's `configuredFor` check and the SMS grant type. |
+
+For the custom grant types, an unknown/disabled/unverified account returns the same `401 + email_otp_required/sms_otp_required + otp_session_id` shape as a valid first-phase response, so the public token endpoint is not an account-enumeration oracle. The fake session id never resolves in phase 2.
+
 ## Setup: Browser Flow
 
 1. In the Keycloak admin console, go to **Authentication** > **Flows**.

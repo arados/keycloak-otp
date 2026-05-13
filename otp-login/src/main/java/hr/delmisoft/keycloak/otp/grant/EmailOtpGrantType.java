@@ -62,4 +62,16 @@ public class EmailOtpGrantType extends AbstractOtpGrantType {
     protected String getChannel() {
         return OtpSendThrottle.CHANNEL_EMAIL;
     }
+
+    @Override
+    protected boolean isChannelVerified(UserModel user) {
+        if (user.getEmail() == null) {
+            return false;
+        }
+        String configured = realm.getAttribute(EmailOtpConst.CONFIG_REQUIRE_VERIFIED_EMAIL);
+        boolean requireVerified = (configured == null || configured.isBlank())
+                ? EmailOtpConst.DEFAULT_REQUIRE_VERIFIED_EMAIL
+                : Boolean.parseBoolean(configured);
+        return !requireVerified || user.isEmailVerified();
+    }
 }

@@ -23,7 +23,8 @@ public class SmsOtpGrantType extends AbstractOtpGrantType {
 
     @Override
     protected void sendOtp(UserModel user, String code) throws Exception {
-        String phoneNumber = user.getFirstAttribute(SmsOtpConst.DEFAULT_PHONE_ATTRIBUTE);
+        String phoneAttr = SmsOtpConst.resolvePhoneAttribute(realm);
+        String phoneNumber = user.getFirstAttribute(phoneAttr);
         if (phoneNumber == null || phoneNumber.isBlank()) {
             throw new IllegalStateException("User has no phone number configured");
         }
@@ -59,5 +60,25 @@ public class SmsOtpGrantType extends AbstractOtpGrantType {
     @Override
     protected String getChannel() {
         return OtpSendThrottle.CHANNEL_SMS;
+    }
+
+    @Override
+    protected boolean isChannelVerified(UserModel user) {
+        String phoneAttr = SmsOtpConst.resolvePhoneAttribute(realm);
+        if (user.getFirstAttribute(phoneAttr) == null) {
+            return false;
+        }
+        String requireConfigured = realm.getAttribute(SmsOtpConst.CONFIG_REQUIRE_VERIFIED_PHONE);
+        boolean requireVerified = (requireConfigured == null || requireConfigured.isBlank())
+                ? SmsOtpConst.DEFAULT_REQUIRE_VERIFIED_PHONE
+                : Boolean.parseBoolean(requireConfigured);
+        if (!requireVerified) {
+            return true;
+        }
+        String verifiedAttr = realm.getAttribute(SmsOtpConst.CONFIG_VERIFIED_PHONE_ATTRIBUTE);
+        if (verifiedAttr == null || verifiedAttr.isBlank()) {
+            verifiedAttr = SmsOtpConst.DEFAULT_VERIFIED_PHONE_ATTRIBUTE;
+        }
+        return "true".equalsIgnoreCase(user.getFirstAttribute(verifiedAttr));
     }
 }

@@ -1,7 +1,5 @@
 package hr.delmisoft.keycloak.otp;
 
-import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
 import java.security.SecureRandom;
 import java.util.HashMap;
 import java.util.Map;
@@ -37,7 +35,8 @@ public class OtpChannelChoiceAuthenticator implements Authenticator {
     static final String TEMPLATE_CHANNEL_SELECT = "login-otp-channel-select.ftl";
 
     static final String AUTH_NOTE_CHANNEL = "otpChannel";
-    static final String AUTH_NOTE_CODE = "otpChoiceCode";
+    static final String AUTH_NOTE_CODE_HASH = "otpChoiceCodeHash";
+    static final String AUTH_NOTE_CODE_SALT = "otpChoiceCodeSalt";
     static final String AUTH_NOTE_EXPIRY = "otpChoiceExpiry";
     static final String AUTH_NOTE_ATTEMPTS = "otpChoiceAttempts";
     static final String AUTH_NOTE_LAST_SENT = "otpChoiceLastSent";
@@ -85,10 +84,7 @@ public class OtpChannelChoiceAuthenticator implements Authenticator {
         }
 
         AuthenticationSessionModel authSession = context.getAuthenticationSession();
-        authSession.removeAuthNote(AUTH_NOTE_CODE);
-        authSession.removeAuthNote(AUTH_NOTE_EXPIRY);
-        authSession.removeAuthNote(AUTH_NOTE_ATTEMPTS);
-        authSession.removeAuthNote(AUTH_NOTE_LAST_SENT);
+        clearCodeNotes(authSession);
         authSession.setAuthNote(AUTH_NOTE_CHANNEL, channel);
 
         // First send is throttled too — defends against OTP spam via repeated channel-select restarts.
@@ -109,24 +105,42 @@ public class OtpChannelChoiceAuthenticator implements Authenticator {
         String throttleChannel = CHANNEL_EMAIL.equals(channel) ? OtpSendThrottle.CHANNEL_EMAIL : OtpSendThrottle.CHANNEL_SMS;
         String template = CHANNEL_EMAIL.equals(channel) ? EmailOtpConst.LOGIN_TEMPLATE : SmsOtpConst.LOGIN_TEMPLATE;
 
-        int cooldown = getConfigInt(context, OtpChannelChoiceConst.CONFIG_SEND_COOLDOWN, OtpChannelChoiceConst.DEFAULT_SEND_COOLDOWN);
-        boolean canSend = OtpSendThrottle.tryReserve(context.getSession(), context.getRealm(), context.getUser(),
-                throttleChannel, cooldown);
+        int cooldown = getCooldownConfig(context);
+        int codeLength = getConfigInt(context, OtpChannelChoiceConst.CONFIG_CODE_LENGTH, OtpChannelChoiceConst.DEFAULT_CODE_LENGTH);
+        int ttl = getConfigInt(context, OtpChannelChoiceConst.CONFIG_TTL, OtpChannelChoiceConst.DEFAULT_TTL);
+        String code = generateCode(codeLength);
+        String salt = OtpHash.newSalt();
+        String hash = OtpHash.hash(code, salt);
+        int codeExpiresAt = Time.currentTime() + ttl;
 
+        boolean canSend = OtpSendThrottle.tryReserveWithCodeHash(context.getSession(), context.getRealm(),
+                context.getUser(), throttleChannel, cooldown, hash, salt, codeExpiresAt);
+
+        AuthenticationSessionModel authSession = context.getAuthenticationSession();
         if (canSend) {
-            int codeLength = getConfigInt(context, OtpChannelChoiceConst.CONFIG_CODE_LENGTH, OtpChannelChoiceConst.DEFAULT_CODE_LENGTH);
-            int ttl = getConfigInt(context, OtpChannelChoiceConst.CONFIG_TTL, OtpChannelChoiceConst.DEFAULT_TTL);
-            String code = generateCode(codeLength);
-
-            AuthenticationSessionModel authSession = context.getAuthenticationSession();
-            authSession.setAuthNote(AUTH_NOTE_CODE, code);
-            authSession.setAuthNote(AUTH_NOTE_EXPIRY, String.valueOf(Time.currentTime() + ttl));
+            authSession.setAuthNote(AUTH_NOTE_CODE_HASH, hash);
+            authSession.setAuthNote(AUTH_NOTE_CODE_SALT, salt);
+            authSession.setAuthNote(AUTH_NOTE_EXPIRY, String.valueOf(codeExpiresAt));
             authSession.setAuthNote(AUTH_NOTE_ATTEMPTS, "0");
             authSession.setAuthNote(AUTH_NOTE_LAST_SENT, String.valueOf(Time.currentTime()));
 
             boolean sent = CHANNEL_EMAIL.equals(channel) ? sendEmail(context, code) : sendSms(context, code);
             if (!sent) {
+                OtpSendThrottle.release(context.getSession(), context.getRealm(), context.getUser(), throttleChannel);
+                clearCodeNotes(authSession);
                 return;
+            }
+        } else {
+            // Throttled. Recover the most recently delivered code's hash/salt for this channel
+            // into this session so a user who legitimately re-selected the channel within the
+            // cooldown can still complete login with the code that was actually sent.
+            OtpSendThrottle.RecentCode recent = OtpSendThrottle.getRecentCode(context.getSession(),
+                    context.getRealm(), context.getUser(), throttleChannel);
+            if (recent != null) {
+                authSession.setAuthNote(AUTH_NOTE_CODE_HASH, recent.codeHash);
+                authSession.setAuthNote(AUTH_NOTE_CODE_SALT, recent.codeSalt);
+                authSession.setAuthNote(AUTH_NOTE_EXPIRY, String.valueOf(recent.expiresAt));
+                authSession.setAuthNote(AUTH_NOTE_ATTEMPTS, "0");
             }
         }
 
@@ -152,11 +166,12 @@ public class OtpChannelChoiceAuthenticator implements Authenticator {
         }
 
         AuthenticationSessionModel authSession = context.getAuthenticationSession();
-        String storedCode = authSession.getAuthNote(AUTH_NOTE_CODE);
+        String storedHash = authSession.getAuthNote(AUTH_NOTE_CODE_HASH);
+        String storedSalt = authSession.getAuthNote(AUTH_NOTE_CODE_SALT);
         String expiryStr = authSession.getAuthNote(AUTH_NOTE_EXPIRY);
         String attemptsStr = authSession.getAuthNote(AUTH_NOTE_ATTEMPTS);
 
-        if (storedCode == null || expiryStr == null || attemptsStr == null) {
+        if (storedHash == null || storedSalt == null || expiryStr == null || attemptsStr == null) {
             authSession.removeAuthNote(AUTH_NOTE_CHANNEL);
             authenticate(context);
             return;
@@ -175,21 +190,26 @@ public class OtpChannelChoiceAuthenticator implements Authenticator {
         int maxRetries = getConfigInt(context, OtpChannelChoiceConst.CONFIG_MAX_RETRIES, OtpChannelChoiceConst.DEFAULT_MAX_RETRIES);
 
         if (Time.currentTime() > expiry) {
-            int cooldown = getConfigInt(context, OtpChannelChoiceConst.CONFIG_SEND_COOLDOWN, OtpChannelChoiceConst.DEFAULT_SEND_COOLDOWN);
-            boolean reserved = OtpSendThrottle.tryReserve(context.getSession(), context.getRealm(), context.getUser(),
-                    throttleChannel, cooldown);
+            int cooldown = getCooldownConfig(context);
+            int codeLength = getConfigInt(context, OtpChannelChoiceConst.CONFIG_CODE_LENGTH, OtpChannelChoiceConst.DEFAULT_CODE_LENGTH);
+            int ttl = getConfigInt(context, OtpChannelChoiceConst.CONFIG_TTL, OtpChannelChoiceConst.DEFAULT_TTL);
+            String newCode = generateCode(codeLength);
+            String newSalt = OtpHash.newSalt();
+            String newHash = OtpHash.hash(newCode, newSalt);
+            int codeExpiresAt = Time.currentTime() + ttl;
+            boolean reserved = OtpSendThrottle.tryReserveWithCodeHash(context.getSession(), context.getRealm(),
+                    context.getUser(), throttleChannel, cooldown, newHash, newSalt, codeExpiresAt);
             if (reserved) {
-                int codeLength = getConfigInt(context, OtpChannelChoiceConst.CONFIG_CODE_LENGTH, OtpChannelChoiceConst.DEFAULT_CODE_LENGTH);
-                int ttl = getConfigInt(context, OtpChannelChoiceConst.CONFIG_TTL, OtpChannelChoiceConst.DEFAULT_TTL);
-                String newCode = generateCode(codeLength);
-                authSession.setAuthNote(AUTH_NOTE_CODE, newCode);
-                authSession.setAuthNote(AUTH_NOTE_EXPIRY, String.valueOf(Time.currentTime() + ttl));
+                authSession.setAuthNote(AUTH_NOTE_CODE_HASH, newHash);
+                authSession.setAuthNote(AUTH_NOTE_CODE_SALT, newSalt);
+                authSession.setAuthNote(AUTH_NOTE_EXPIRY, String.valueOf(codeExpiresAt));
                 authSession.setAuthNote(AUTH_NOTE_ATTEMPTS, "0");
                 authSession.setAuthNote(AUTH_NOTE_LAST_SENT, String.valueOf(Time.currentTime()));
-                if (CHANNEL_EMAIL.equals(channel)) {
-                    sendEmail(context, newCode);
-                } else {
-                    sendSms(context, newCode);
+                boolean sent = CHANNEL_EMAIL.equals(channel) ? sendEmail(context, newCode) : sendSms(context, newCode);
+                if (!sent) {
+                    OtpSendThrottle.release(context.getSession(), context.getRealm(), context.getUser(), throttleChannel);
+                    clearCodeNotes(authSession);
+                    return;
                 }
             }
             int remaining = OtpSendThrottle.remainingSeconds(context.getSession(), context.getRealm(),
@@ -208,7 +228,7 @@ public class OtpChannelChoiceAuthenticator implements Authenticator {
             return;
         }
 
-        if (MessageDigest.isEqual(storedCode.getBytes(StandardCharsets.UTF_8), enteredOtp.getBytes(StandardCharsets.UTF_8))) {
+        if (OtpHash.verify(enteredOtp, storedHash, storedSalt)) {
             context.success();
         } else {
             authSession.setAuthNote(AUTH_NOTE_ATTEMPTS, String.valueOf(attempts + 1));
@@ -224,7 +244,35 @@ public class OtpChannelChoiceAuthenticator implements Authenticator {
 
     @Override
     public boolean configuredFor(KeycloakSession session, RealmModel realm, UserModel user) {
-        return user.getEmail() != null || user.getFirstAttribute(SmsOtpConst.DEFAULT_PHONE_ATTRIBUTE) != null;
+        // Either channel must be usable. Email also needs verification when the realm requires it.
+        boolean emailUsable = user.getEmail() != null;
+        if (emailUsable) {
+            String reqVerified = realm.getAttribute(EmailOtpConst.CONFIG_REQUIRE_VERIFIED_EMAIL);
+            boolean requireVerified = (reqVerified == null || reqVerified.isBlank())
+                    ? EmailOtpConst.DEFAULT_REQUIRE_VERIFIED_EMAIL
+                    : Boolean.parseBoolean(reqVerified);
+            if (requireVerified && !user.isEmailVerified()) {
+                emailUsable = false;
+            }
+        }
+
+        String phoneAttr = SmsOtpConst.resolvePhoneAttribute(realm);
+        boolean smsUsable = user.getFirstAttribute(phoneAttr) != null;
+        if (smsUsable) {
+            String reqVerified = realm.getAttribute(SmsOtpConst.CONFIG_REQUIRE_VERIFIED_PHONE);
+            boolean requireVerified = (reqVerified == null || reqVerified.isBlank())
+                    ? SmsOtpConst.DEFAULT_REQUIRE_VERIFIED_PHONE
+                    : Boolean.parseBoolean(reqVerified);
+            if (requireVerified) {
+                String verifiedAttr = realm.getAttribute(SmsOtpConst.CONFIG_VERIFIED_PHONE_ATTRIBUTE);
+                if (verifiedAttr == null || verifiedAttr.isBlank()) {
+                    verifiedAttr = SmsOtpConst.DEFAULT_VERIFIED_PHONE_ATTRIBUTE;
+                }
+                smsUsable = "true".equalsIgnoreCase(user.getFirstAttribute(verifiedAttr));
+            }
+        }
+
+        return emailUsable || smsUsable;
     }
 
     @Override
@@ -252,7 +300,8 @@ public class OtpChannelChoiceAuthenticator implements Authenticator {
     }
 
     private boolean sendSms(AuthenticationFlowContext context, String code) {
-        String phoneAttr = getConfigString(context, OtpChannelChoiceConst.CONFIG_PHONE_ATTRIBUTE, SmsOtpConst.DEFAULT_PHONE_ATTRIBUTE);
+        String phoneAttr = getConfigString(context, OtpChannelChoiceConst.CONFIG_PHONE_ATTRIBUTE,
+                SmsOtpConst.resolvePhoneAttribute(context.getRealm()));
         String phoneNumber = context.getUser().getFirstAttribute(phoneAttr);
         if (phoneNumber == null || phoneNumber.isBlank()) {
             context.failureChallenge(AuthenticationFlowError.INTERNAL_ERROR,
@@ -270,6 +319,14 @@ public class OtpChannelChoiceAuthenticator implements Authenticator {
                             .createErrorPage(jakarta.ws.rs.core.Response.Status.INTERNAL_SERVER_ERROR));
             return false;
         }
+    }
+
+    private static void clearCodeNotes(AuthenticationSessionModel authSession) {
+        authSession.removeAuthNote(AUTH_NOTE_CODE_HASH);
+        authSession.removeAuthNote(AUTH_NOTE_CODE_SALT);
+        authSession.removeAuthNote(AUTH_NOTE_EXPIRY);
+        authSession.removeAuthNote(AUTH_NOTE_ATTEMPTS);
+        authSession.removeAuthNote(AUTH_NOTE_LAST_SENT);
     }
 
     static String generateCode(int length) {
@@ -296,5 +353,23 @@ public class OtpChannelChoiceAuthenticator implements Authenticator {
         if (config == null || config.getConfig() == null) return defaultValue;
         String value = config.getConfig().get(key);
         return (value == null || value.isBlank()) ? defaultValue : value;
+    }
+
+    private static int getCooldownConfig(AuthenticationFlowContext context) {
+        AuthenticatorConfigModel config = context.getAuthenticatorConfig();
+        if (config != null && config.getConfig() != null) {
+            String value = config.getConfig().get(OtpChannelChoiceConst.CONFIG_SEND_COOLDOWN);
+            if (value != null && !value.isBlank()) {
+                try {
+                    int parsed = Integer.parseInt(value);
+                    if (parsed >= 0) {
+                        return parsed;
+                    }
+                } catch (NumberFormatException ignored) {
+                    // fall through
+                }
+            }
+        }
+        return OtpChannelChoiceConst.DEFAULT_SEND_COOLDOWN;
     }
 }
