@@ -23,7 +23,7 @@ function countSmsSends() {
   return (logs.match(/Your verification code is:\s*\d{6}/g) || []).length;
 }
 
-test.describe('OTP send rate limiting (passwordless SMS flow, cooldown=2s)', () => {
+test.describe('OTP send rate limiting (passwordless SMS flow, cooldown=5s)', () => {
   test.describe.configure({ mode: 'serial' });
 
   test('resend button is disabled during cooldown and enabled afterwards', async ({ page }) => {
@@ -42,12 +42,12 @@ test.describe('OTP send rate limiting (passwordless SMS flow, cooldown=2s)', () 
     const initialLabel = await page.locator('#kc-otp-resend-label').textContent();
     expect(initialLabel).toMatch(/Resend available in \d+s/);
 
-    // After the cooldown elapses, the button becomes enabled (countdown JS flips it)
-    // realm config sets sendCooldown=3s; add buffer.
+    // After the cooldown elapses, the button becomes enabled (countdown JS flips it).
+    // Realm config sets sendCooldown=5s; timeout includes buffer for slow CI render.
     await page.waitForFunction(
       () => !document.getElementById('kc-otp-resend-button').disabled,
       null,
-      { timeout: 10_000 }
+      { timeout: 15_000 }
     );
 
     const finalLabel = await page.locator('#kc-otp-resend-label').textContent();
@@ -94,7 +94,7 @@ test.describe('OTP send rate limiting (passwordless SMS flow, cooldown=2s)', () 
     await page.waitForFunction(
       () => !document.getElementById('kc-otp-resend-button').disabled,
       null,
-      { timeout: 10_000 }
+      { timeout: 15_000 }
     );
 
     await page.click('#kc-otp-resend-button');
@@ -111,14 +111,14 @@ test.describe('OTP send rate limiting (passwordless SMS flow, cooldown=2s)', () 
   });
 });
 
-test.describe('OTP grant type rate limiting (SMS, cooldown=2s)', () => {
+test.describe('OTP grant type rate limiting (SMS, cooldown=5s)', () => {
   test.describe.configure({ mode: 'serial' });
 
   const TOKEN_URL = `${KEYCLOAK_URL}/realms/${REALM}/protocol/openid-connect/token`;
 
   test('second phase-1 request within cooldown returns HTTP 429 with Retry-After', async ({ request }) => {
     // Wait so we don't collide with any in-flight cooldown from prior tests
-    await new Promise((r) => setTimeout(r, 4_000));
+    await new Promise((r) => setTimeout(r, 7_000));
 
     const params = new URLSearchParams({
       grant_type: 'urn:otp:sms',
@@ -144,7 +144,7 @@ test.describe('OTP grant type rate limiting (SMS, cooldown=2s)', () => {
     const secondBody = await second.json();
     expect(secondBody.error).toBe('otp_send_throttled');
     expect(secondBody.retry_after).toBeGreaterThan(0);
-    expect(secondBody.retry_after).toBeLessThanOrEqual(2);
+    expect(secondBody.retry_after).toBeLessThanOrEqual(5);
 
     const retryAfterHeader = second.headers()['retry-after'];
     expect(retryAfterHeader).toBeTruthy();
@@ -153,7 +153,7 @@ test.describe('OTP grant type rate limiting (SMS, cooldown=2s)', () => {
 
   test('after cooldown expires the grant type allows another send', async ({ request }) => {
     // Wait past the cooldown
-    await new Promise((r) => setTimeout(r, 4_000));
+    await new Promise((r) => setTimeout(r, 7_000));
 
     const params = new URLSearchParams({
       grant_type: 'urn:otp:sms',

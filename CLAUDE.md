@@ -111,7 +111,7 @@ mvn verify -P e2e                            # Unit tests + docker up + Playwrig
 
 The `e2e` Maven module (activated by the `-P e2e` profile) is wired into the standard `pre-integration-test` → `integration-test` → `post-integration-test` → `verify` lifecycle via `maven-antrun-plugin`: it brings up `docker compose`, polls until Keycloak is reachable, runs `npx playwright test`, then tears the stack down regardless of test outcome. A failing test run propagates as a Maven build failure via a recorded exit code in `e2e/target/e2e-exit-code.txt`.
 
-> The demo realm sets `sendCooldown=2s` (and `otp.sendCooldown=2s` for grant types) so the resend E2E tests can exercise both the throttled-then-allowed transitions without long waits.
+> The demo realm sets `sendCooldown=5s` (and `otp.sendCooldown=5s` for grant types). Long enough that slow CI render delay can't burn through the cooldown before the OTP form is rendered (the disabled-resend-button assertion was flaking at 2s), short enough that the resend E2E tests still exercise the throttled-then-allowed transitions without long waits.
 
 E2E tests extract SMS OTP codes from Docker logs (`LogSmsSenderFactory` output) and email OTP codes from Mailpit API.
 

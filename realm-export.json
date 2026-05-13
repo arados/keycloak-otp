@@ -6,7 +6,7 @@
   "loginTheme": "otp",
   "emailTheme": "otp",
   "attributes": {
-    "otp.sendCooldown": "2"
+    "otp.sendCooldown": "5"
   },
   "smtpServer": {
     "host": "mailpit",
@@ -244,7 +244,7 @@
         "emailOtp.codeLength": "6",
         "emailOtp.ttl": "300",
         "emailOtp.maxRetries": "3",
-        "emailOtp.sendCooldown": "2"
+        "emailOtp.sendCooldown": "5"
       }
     },
     {
@@ -254,7 +254,7 @@
         "otpChoice.ttl": "300",
         "otpChoice.maxRetries": "3",
         "otpChoice.phoneAttribute": "phoneNumber",
-        "otpChoice.sendCooldown": "2"
+        "otpChoice.sendCooldown": "5"
       }
     },
     {
@@ -264,7 +264,7 @@
         "smsOtp.ttl": "300",
         "smsOtp.maxRetries": "3",
         "smsOtp.phoneAttribute": "phoneNumber",
-        "smsOtp.sendCooldown": "2"
+        "smsOtp.sendCooldown": "5"
       }
     }
   ],
