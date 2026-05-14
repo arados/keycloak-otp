@@ -406,7 +406,11 @@ Tests cover:
 
 ## Security
 
-> **Warning**: The Docker Compose setup and `otp-demo` realm are for **development and testing only**. They use hardcoded credentials (`admin/admin`, `testuser/password`) and the log-based SMS provider. Do not use these in production.
+> **Warning**: `docker-compose.yml`, `realm-export.json`, and the included `LogSmsSenderFactory` are **development assets only — do not deploy them as-is**.
+>
+> Specifically, the demo stack uses `start-dev`, HTTP without TLS, `KC_HOSTNAME_STRICT=false`, bootstrap admin `admin` / `admin`, a test user `testuser` / `password`, and `KEYCLOAK_OTP_LOG_SMS_UNSAFE=true` (which logs raw OTP codes). The demo realm exposes public clients with direct grants enabled so the e2e suite can exercise the token endpoint. None of this is safe outside a developer laptop.
+>
+> For production, take **only** the shaded JAR (`dist/target/keycloak-otp-*.jar`) and deploy it into a properly hardened Keycloak (production profile, TLS-terminated reverse proxy, strong credentials, durable database, a real `SmsProvider`, and upstream IP-based rate limiting in front of any public OTP endpoint).
 
 - OTP codes are compared using constant-time comparison (`MessageDigest.isEqual`) to prevent timing attacks
 - Codes are generated with `SecureRandom`
