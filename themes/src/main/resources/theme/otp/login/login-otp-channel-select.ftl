@@ -9,6 +9,7 @@
         <form id="kc-otp-channel-select-form" class="${properties.kcFormClass!}" action="${url.loginAction}" method="post">
             <div class="${properties.kcFormGroupClass!}">
                 <ul class="${properties.kcSelectAuthListClass!}" role="list">
+                    <#if (emailAllowed!false)>
                     <li class="${properties.kcSelectAuthListItemWrapperClass!}">
                         <button type="submit" name="channel" value="email"
                                 class="${properties.kcSelectAuthListItemClass!}" style="width:100%;border:none;background:none;cursor:pointer;text-align:left;">
@@ -30,6 +31,8 @@
                             </div>
                         </button>
                     </li>
+                    </#if>
+                    <#if (smsAllowed!false)>
                     <li class="${properties.kcSelectAuthListItemWrapperClass!}">
                         <button type="submit" name="channel" value="sms"
                                 class="${properties.kcSelectAuthListItemClass!}" style="width:100%;border:none;background:none;cursor:pointer;text-align:left;">
@@ -51,6 +54,7 @@
                             </div>
                         </button>
                     </li>
+                    </#if>
                 </ul>
             </div>
         </form>

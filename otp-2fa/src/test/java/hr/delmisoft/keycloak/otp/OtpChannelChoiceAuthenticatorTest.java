@@ -85,6 +85,10 @@ class OtpChannelChoiceAuthenticatorTest {
         when(user.getId()).thenReturn("user-1");
         when(singleUseStore.putIfAbsent(anyString(), anyLong())).thenReturn(true);
         when(user.getFirstAttribute(SmsOtpConst.DEFAULT_PHONE_ATTRIBUTE)).thenReturn("+1234567890");
+        // Both channels are usable by default — individual tests can opt out by overriding
+        // these stubs (e.g. to verify SEC-001 enforcement when a channel is unverified).
+        when(user.getEmail()).thenReturn("test@example.com");
+        when(user.isEmailVerified()).thenReturn(true);
     }
 
     private void stubStoredCode(String channel, String plainCode, int secondsUntilExpiry, String attempts) {
@@ -102,12 +106,57 @@ class OtpChannelChoiceAuthenticatorTest {
 
     @Test
     void authenticate_showsChannelSelectionForm() {
+        setupCommonMocks();
         when(context.form()).thenReturn(form);
         when(form.setAttribute(anyString(), any())).thenReturn(form);
         when(form.createForm(OtpChannelChoiceAuthenticator.TEMPLATE_CHANNEL_SELECT)).thenReturn(formResponse);
 
         authenticator.authenticate(context);
 
+        // Both channels usable by default — both `emailAllowed` and `smsAllowed` propagate
+        // to the template so the FTL renders the corresponding buttons.
+        verify(form).setAttribute("emailAllowed", true);
+        verify(form).setAttribute("smsAllowed", true);
+        verify(context).challenge(formResponse);
+    }
+
+    @Test
+    void authenticate_unverifiedEmail_hidesEmailButton() {
+        // SEC-001: with `emailOtp.requireVerifiedEmail` defaulted to true, a user whose
+        // email is unverified must not see the Email channel button on the selection screen.
+        setupCommonMocks();
+        when(user.isEmailVerified()).thenReturn(false);
+        when(context.form()).thenReturn(form);
+        when(form.setAttribute(anyString(), any())).thenReturn(form);
+        when(form.createForm(OtpChannelChoiceAuthenticator.TEMPLATE_CHANNEL_SELECT)).thenReturn(formResponse);
+
+        authenticator.authenticate(context);
+
+        verify(form).setAttribute("emailAllowed", false);
+        verify(form).setAttribute("smsAllowed", true);
+    }
+
+    @Test
+    void action_selectUnverifiedEmail_rejectsAndDoesNotSend() throws Exception {
+        // SEC-001: even if the client crafts a POST with channel=email, the server must
+        // re-check the per-channel verification policy before sending. Mirrors what the
+        // template-level filter already does for honest clients.
+        setupCommonMocks();
+        when(user.isEmailVerified()).thenReturn(false);
+        MultivaluedMap<String, String> formParams = new MultivaluedHashMap<>();
+        formParams.putSingle(OtpChannelChoiceAuthenticator.PARAM_CHANNEL, "email");
+        when(context.getHttpRequest()).thenReturn(httpRequest);
+        when(httpRequest.getDecodedFormParameters()).thenReturn(formParams);
+        when(context.form()).thenReturn(form);
+        when(form.setAttribute(anyString(), any())).thenReturn(form);
+        when(form.setError(anyString())).thenReturn(form);
+        when(form.createForm(OtpChannelChoiceAuthenticator.TEMPLATE_CHANNEL_SELECT)).thenReturn(formResponse);
+
+        authenticator.action(context);
+
+        verify(emailProvider, never()).send(anyString(), anyString(), any());
+        verify(authSession, never()).setAuthNote(eq(OtpChannelChoiceAuthenticator.AUTH_NOTE_CHANNEL), anyString());
+        verify(form).setError("otpChannelInvalid");
         verify(context).challenge(formResponse);
     }
 
@@ -154,11 +203,11 @@ class OtpChannelChoiceAuthenticatorTest {
 
     @Test
     void action_invalidChannel_showsSelectionWithError() {
+        setupCommonMocks();
         MultivaluedMap<String, String> formParams = new MultivaluedHashMap<>();
         formParams.putSingle(OtpChannelChoiceAuthenticator.PARAM_CHANNEL, "invalid");
         when(context.getHttpRequest()).thenReturn(httpRequest);
         when(httpRequest.getDecodedFormParameters()).thenReturn(formParams);
-        when(context.getAuthenticationSession()).thenReturn(authSession);
         when(context.form()).thenReturn(form);
         when(form.setAttribute(anyString(), any())).thenReturn(form);
         when(form.setError(anyString())).thenReturn(form);
@@ -207,7 +256,10 @@ class OtpChannelChoiceAuthenticatorTest {
     }
 
     @Test
-    void action_smsNoPhoneNumber_returnsError() {
+    void action_smsNoPhoneNumber_rejectsChannelSelection() throws Exception {
+        // SEC-001: a hostile client could POST channel=sms even though the FTL hid the
+        // SMS button (because the user has no phone attribute). The server must reject
+        // *before* attempting to send, not fall through to a delivery-time INTERNAL_ERROR.
         setupCommonMocks();
         when(user.getFirstAttribute(SmsOtpConst.DEFAULT_PHONE_ATTRIBUTE)).thenReturn(null);
         MultivaluedMap<String, String> formParams = new MultivaluedHashMap<>();
@@ -217,11 +269,14 @@ class OtpChannelChoiceAuthenticatorTest {
         when(context.form()).thenReturn(form);
         when(form.setAttribute(anyString(), any())).thenReturn(form);
         when(form.setError(anyString())).thenReturn(form);
-        when(form.createErrorPage(any())).thenReturn(formResponse);
+        when(form.createForm(OtpChannelChoiceAuthenticator.TEMPLATE_CHANNEL_SELECT)).thenReturn(formResponse);
 
         authenticator.action(context);
 
-        verify(context).failureChallenge(eq(AuthenticationFlowError.INTERNAL_ERROR), any());
+        verify(smsProvider, never()).send(anyString(), anyString());
+        verify(authSession, never()).setAuthNote(eq(OtpChannelChoiceAuthenticator.AUTH_NOTE_CHANNEL), anyString());
+        verify(form).setError("otpChannelInvalid");
+        verify(context).challenge(formResponse);
     }
 
     // --- OTP verification (phase 2) ---
@@ -356,11 +411,11 @@ class OtpChannelChoiceAuthenticatorTest {
 
     @Test
     void action_missingSessionState_restartsChannelSelection() {
+        setupCommonMocks();
         MultivaluedMap<String, String> formParams = new MultivaluedHashMap<>();
         formParams.putSingle(OtpChannelChoiceAuthenticator.PARAM_OTP, "123456");
         when(context.getHttpRequest()).thenReturn(httpRequest);
         when(httpRequest.getDecodedFormParameters()).thenReturn(formParams);
-        when(context.getAuthenticationSession()).thenReturn(authSession);
         when(authSession.getAuthNote(OtpChannelChoiceAuthenticator.AUTH_NOTE_CHANNEL)).thenReturn("email");
         when(authSession.getAuthNote(OtpChannelChoiceAuthenticator.AUTH_NOTE_CODE_HASH)).thenReturn(null);
         when(authSession.getAuthNote(OtpChannelChoiceAuthenticator.AUTH_NOTE_CODE_SALT)).thenReturn(null);
@@ -435,10 +490,10 @@ class OtpChannelChoiceAuthenticatorTest {
 
     @Test
     void action_noChannelParamNoSessionState_restartsSelection() {
+        setupCommonMocks();
         MultivaluedMap<String, String> formParams = new MultivaluedHashMap<>();
         when(context.getHttpRequest()).thenReturn(httpRequest);
         when(httpRequest.getDecodedFormParameters()).thenReturn(formParams);
-        when(context.getAuthenticationSession()).thenReturn(authSession);
         when(authSession.getAuthNote(OtpChannelChoiceAuthenticator.AUTH_NOTE_CHANNEL)).thenReturn(null);
         when(context.form()).thenReturn(form);
         when(form.setAttribute(anyString(), any())).thenReturn(form);
