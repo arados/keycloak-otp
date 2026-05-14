@@ -74,13 +74,6 @@ public class OtpChannelChoiceAuthenticatorFactory implements AuthenticatorFactor
         maxRetries.setType(ProviderConfigProperty.STRING_TYPE);
         maxRetries.setDefaultValue(String.valueOf(OtpChannelChoiceConst.DEFAULT_MAX_RETRIES));
 
-        ProviderConfigProperty phoneAttr = new ProviderConfigProperty();
-        phoneAttr.setName(OtpChannelChoiceConst.CONFIG_PHONE_ATTRIBUTE);
-        phoneAttr.setLabel("Phone Number Attribute");
-        phoneAttr.setHelpText("User attribute that stores the phone number.");
-        phoneAttr.setType(ProviderConfigProperty.STRING_TYPE);
-        phoneAttr.setDefaultValue(SmsOtpConst.DEFAULT_PHONE_ATTRIBUTE);
-
         ProviderConfigProperty sendCooldown = new ProviderConfigProperty();
         sendCooldown.setName(OtpChannelChoiceConst.CONFIG_SEND_COOLDOWN);
         sendCooldown.setLabel("Send Cooldown (seconds)");
@@ -88,7 +81,9 @@ public class OtpChannelChoiceAuthenticatorFactory implements AuthenticatorFactor
         sendCooldown.setType(ProviderConfigProperty.STRING_TYPE);
         sendCooldown.setDefaultValue(String.valueOf(OtpChannelChoiceConst.DEFAULT_SEND_COOLDOWN));
 
-        return List.of(codeLength, ttl, maxRetries, phoneAttr, sendCooldown);
+        // Phone attribute deliberately omitted: realm-scoped only (`smsOtp.phoneAttribute`).
+        // See CFG-001 — keeping it per-execution let admins desync eligibility and delivery.
+        return List.of(codeLength, ttl, maxRetries, sendCooldown);
     }
 
     @Override

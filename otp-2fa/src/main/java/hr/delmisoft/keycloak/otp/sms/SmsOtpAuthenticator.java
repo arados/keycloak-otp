@@ -219,8 +219,10 @@ public class SmsOtpAuthenticator implements Authenticator {
     }
 
     private boolean sendSms(AuthenticationFlowContext context, String code) {
-        String phoneAttr = getConfigString(context, SmsOtpConst.CONFIG_PHONE_ATTRIBUTE,
-                resolvePhoneAttribute(context.getRealm()));
+        // Phone attribute is realm-scoped only; matches the eligibility check in
+        // configuredFor() so admins cannot configure a flow where "is the user set up?"
+        // and "where do we actually send?" diverge.
+        String phoneAttr = resolvePhoneAttribute(context.getRealm());
         String phoneNumber = context.getUser().getFirstAttribute(phoneAttr);
         if (phoneNumber == null || phoneNumber.isBlank()) {
             context.failureChallenge(AuthenticationFlowError.INTERNAL_ERROR,

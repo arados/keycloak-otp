@@ -253,7 +253,6 @@
         "otpChoice.codeLength": "6",
         "otpChoice.ttl": "300",
         "otpChoice.maxRetries": "3",
-        "otpChoice.phoneAttribute": "phoneNumber",
         "otpChoice.sendCooldown": "5"
       }
     },
@@ -263,7 +262,6 @@
         "smsOtp.codeLength": "6",
         "smsOtp.ttl": "300",
         "smsOtp.maxRetries": "3",
-        "smsOtp.phoneAttribute": "phoneNumber",
         "smsOtp.sendCooldown": "5"
       }
     }

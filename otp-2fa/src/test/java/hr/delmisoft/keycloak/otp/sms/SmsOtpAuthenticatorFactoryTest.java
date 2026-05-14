@@ -46,14 +46,14 @@ class SmsOtpAuthenticatorFactoryTest {
     }
 
     @Test
-    void getConfigProperties_returnsFiveProperties() {
+    void getConfigProperties_returnsFourProperties() {
+        // Phone attribute is intentionally absent — it is realm-scoped only. See CFG-001.
         List<ProviderConfigProperty> props = factory.getConfigProperties();
-        assertThat(props, hasSize(5));
+        assertThat(props, hasSize(4));
         assertThat(props.get(0).getName(), equalTo(SmsOtpConst.CONFIG_CODE_LENGTH));
         assertThat(props.get(1).getName(), equalTo(SmsOtpConst.CONFIG_TTL));
         assertThat(props.get(2).getName(), equalTo(SmsOtpConst.CONFIG_MAX_RETRIES));
-        assertThat(props.get(3).getName(), equalTo(SmsOtpConst.CONFIG_PHONE_ATTRIBUTE));
-        assertThat(props.get(4).getName(), equalTo(SmsOtpConst.CONFIG_SEND_COOLDOWN));
+        assertThat(props.get(3).getName(), equalTo(SmsOtpConst.CONFIG_SEND_COOLDOWN));
     }
 
     @Test
@@ -62,8 +62,7 @@ class SmsOtpAuthenticatorFactoryTest {
         assertThat(props.get(0).getDefaultValue(), equalTo(String.valueOf(SmsOtpConst.DEFAULT_CODE_LENGTH)));
         assertThat(props.get(1).getDefaultValue(), equalTo(String.valueOf(SmsOtpConst.DEFAULT_TTL)));
         assertThat(props.get(2).getDefaultValue(), equalTo(String.valueOf(SmsOtpConst.DEFAULT_MAX_RETRIES)));
-        assertThat(props.get(3).getDefaultValue(), equalTo(SmsOtpConst.DEFAULT_PHONE_ATTRIBUTE));
-        assertThat(props.get(4).getDefaultValue(), equalTo(String.valueOf(SmsOtpConst.DEFAULT_SEND_COOLDOWN)));
+        assertThat(props.get(3).getDefaultValue(), equalTo(String.valueOf(SmsOtpConst.DEFAULT_SEND_COOLDOWN)));
     }
 
     @Test

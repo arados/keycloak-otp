@@ -243,10 +243,8 @@ class SmsOtpAuthenticatorTest {
         Map<String, String> config = new HashMap<>();
         config.put(SmsOtpConst.CONFIG_CODE_LENGTH, "8");
         config.put(SmsOtpConst.CONFIG_TTL, "600");
-        config.put(SmsOtpConst.CONFIG_PHONE_ATTRIBUTE, "mobile");
         when(authenticatorConfig.getConfig()).thenReturn(config);
         when(context.getAuthenticatorConfig()).thenReturn(authenticatorConfig);
-        when(user.getFirstAttribute("mobile")).thenReturn("+9876543210");
         when(context.form()).thenReturn(form);
         when(form.setAttribute(anyString(), any())).thenReturn(form);
         when(form.createForm(SmsOtpConst.LOGIN_TEMPLATE)).thenReturn(formResponse);
@@ -257,6 +255,23 @@ class SmsOtpAuthenticatorTest {
         // plaintext is unobservable now, but the length config feeds into hash generation).
         verify(authSession).setAuthNote(eq(SmsOtpConst.AUTH_NOTE_CODE_HASH), anyString());
         verify(authSession).setAuthNote(eq(SmsOtpConst.AUTH_NOTE_CODE_SALT), anyString());
+        verify(smsProvider).send(eq("+1234567890"), anyString());
+    }
+
+    @Test
+    void authenticate_honorsRealmLevelPhoneAttribute() throws Exception {
+        // CFG-001: phone attribute is now resolved exclusively from the realm-level
+        // `smsOtp.phoneAttribute`, ensuring eligibility (configuredFor) and delivery
+        // read the same user attribute.
+        setupCommonMocks();
+        when(realm.getAttribute(SmsOtpConst.CONFIG_PHONE_ATTRIBUTE)).thenReturn("mobile");
+        when(user.getFirstAttribute("mobile")).thenReturn("+9876543210");
+        when(context.form()).thenReturn(form);
+        when(form.setAttribute(anyString(), any())).thenReturn(form);
+        when(form.createForm(SmsOtpConst.LOGIN_TEMPLATE)).thenReturn(formResponse);
+
+        authenticator.authenticate(context);
+
         verify(smsProvider).send(eq("+9876543210"), anyString());
     }
 
