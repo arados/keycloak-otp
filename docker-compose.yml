@@ -1,3 +1,21 @@
+# ============================================================================
+# DEMO / DEVELOPMENT ONLY — DO NOT USE AS-IS IN PRODUCTION.
+#
+# This stack intentionally trades security for ease of local use:
+#   - `start-dev` runs Keycloak with the dev profile (HTTP enabled, hostname-strict
+#     disabled, in-memory H2 by default).
+#   - Bootstrap admin credentials are `admin` / `admin`.
+#   - The `otp-demo` realm pre-creates a test user `testuser` / `password`.
+#   - `KEYCLOAK_OTP_LOG_SMS_UNSAFE=true` writes raw OTP codes to the server log
+#     so the e2e suite can pick them up via `docker compose logs`.
+#
+# For production, deploy the shaded JAR (`dist/target/keycloak-otp-*.jar`) into a
+# properly hardened Keycloak instance: production profile, TLS-terminated reverse
+# proxy, strong admin credentials, durable database, and a real `SmsProvider`
+# implementation. The realm-export.json in this repo is reference structure only,
+# not a deployable artifact.
+# ============================================================================
+
 services:
   keycloak:
     build: .
