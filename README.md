@@ -113,8 +113,9 @@ All authenticators are configurable through the Keycloak admin console under the
 | `smsOtp.codeLength` | Code Length | `6` | Number of digits in the OTP code |
 | `smsOtp.ttl` | Code TTL (seconds) | `300` | Time-to-live for the OTP code |
 | `smsOtp.maxRetries` | Max Retries | `3` | Max failed attempts before invalidation |
-| `smsOtp.phoneAttribute` | Phone Number Attribute | `phoneNumber` | User attribute storing the phone number |
 | `smsOtp.sendCooldown` | Send Cooldown (seconds) | `60` | Minimum interval between resends per user. Resend button is disabled while this elapses. Set to `0` to disable throttling. Should be `< ttl`. |
+
+The phone-number user attribute is configured at the **realm** level, not per execution — see the [Channel verification](#channel-verification-security) section.
 
 ### Send Rate Limiting
 
@@ -275,8 +276,9 @@ browser-otp-choice-forms           (ALTERNATIVE)
 | `otpChoice.codeLength` | Code Length | `6` | Number of digits in the OTP code |
 | `otpChoice.ttl` | Code TTL (seconds) | `300` | Time-to-live for the OTP code |
 | `otpChoice.maxRetries` | Max Retries | `3` | Max failed attempts before invalidation |
-| `otpChoice.phoneAttribute` | Phone Number Attribute | `phoneNumber` | User attribute storing the phone number |
 | `otpChoice.sendCooldown` | Send Cooldown (seconds) | `60` | Minimum interval between resends per user, per channel |
+
+The phone-number user attribute is configured at the **realm** level (`smsOtp.phoneAttribute`), not per execution — see the [Channel verification](#channel-verification-security) section.
 
 ## Email Configuration
 

@@ -300,8 +300,9 @@ public class OtpChannelChoiceAuthenticator implements Authenticator {
     }
 
     private boolean sendSms(AuthenticationFlowContext context, String code) {
-        String phoneAttr = getConfigString(context, OtpChannelChoiceConst.CONFIG_PHONE_ATTRIBUTE,
-                SmsOtpConst.resolvePhoneAttribute(context.getRealm()));
+        // Phone attribute is realm-scoped only — same lookup as configuredFor() so
+        // eligibility and delivery agree on which user attribute to read.
+        String phoneAttr = SmsOtpConst.resolvePhoneAttribute(context.getRealm());
         String phoneNumber = context.getUser().getFirstAttribute(phoneAttr);
         if (phoneNumber == null || phoneNumber.isBlank()) {
             context.failureChallenge(AuthenticationFlowError.INTERNAL_ERROR,

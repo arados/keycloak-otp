@@ -72,13 +72,6 @@ public class SmsOtpAuthenticatorFactory implements AuthenticatorFactory {
         maxRetries.setType(ProviderConfigProperty.STRING_TYPE);
         maxRetries.setDefaultValue(String.valueOf(SmsOtpConst.DEFAULT_MAX_RETRIES));
 
-        ProviderConfigProperty phoneAttr = new ProviderConfigProperty();
-        phoneAttr.setName(SmsOtpConst.CONFIG_PHONE_ATTRIBUTE);
-        phoneAttr.setLabel("Phone Number Attribute");
-        phoneAttr.setHelpText("User attribute that stores the phone number.");
-        phoneAttr.setType(ProviderConfigProperty.STRING_TYPE);
-        phoneAttr.setDefaultValue(SmsOtpConst.DEFAULT_PHONE_ATTRIBUTE);
-
         ProviderConfigProperty sendCooldown = new ProviderConfigProperty();
         sendCooldown.setName(SmsOtpConst.CONFIG_SEND_COOLDOWN);
         sendCooldown.setLabel("Send Cooldown (seconds)");
@@ -86,7 +79,12 @@ public class SmsOtpAuthenticatorFactory implements AuthenticatorFactory {
         sendCooldown.setType(ProviderConfigProperty.STRING_TYPE);
         sendCooldown.setDefaultValue(String.valueOf(SmsOtpConst.DEFAULT_SEND_COOLDOWN));
 
-        return List.of(codeLength, ttl, maxRetries, phoneAttr, sendCooldown);
+        // Phone attribute deliberately omitted here: it is realm-scoped only,
+        // configured via the realm attribute `smsOtp.phoneAttribute`. Putting it on
+        // the per-execution config let admins set a different attribute than the one
+        // configuredFor() reads, so a user could be classified ineligible (or vice
+        // versa) while delivery succeeded against a different attribute. See CFG-001.
+        return List.of(codeLength, ttl, maxRetries, sendCooldown);
     }
 
     @Override
