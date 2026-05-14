@@ -32,7 +32,7 @@ mvn clean package
 ```
 
 Produces a single deployable JAR:
-- `dist/target/keycloak-otp-1.0.0-SNAPSHOT.jar`
+- `dist/target/keycloak-otp-*.jar` (filename includes the current version)
 
 Or download a pre-built JAR from [GitHub Releases](https://github.com/arados/keycloak-otp/releases).
 
@@ -41,7 +41,7 @@ Or download a pre-built JAR from [GitHub Releases](https://github.com/arados/key
 Copy the single JAR into Keycloak's `providers/` directory:
 
 ```bash
-cp dist/target/keycloak-otp-1.0.0-SNAPSHOT.jar /opt/keycloak/providers/
+cp dist/target/keycloak-otp-*.jar /opt/keycloak/providers/
 ```
 
 Then rebuild Keycloak (required after adding providers):
