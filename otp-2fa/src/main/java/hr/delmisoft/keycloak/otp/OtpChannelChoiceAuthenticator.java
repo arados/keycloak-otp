@@ -52,8 +52,15 @@ public class OtpChannelChoiceAuthenticator implements Authenticator {
 
     @Override
     public void authenticate(AuthenticationFlowContext context) {
-        // Show channel selection form
-        context.challenge(context.form().createForm(TEMPLATE_CHANNEL_SELECT));
+        RealmModel realm = context.getRealm();
+        UserModel user = context.getUser();
+        boolean emailAllowed = isEmailUsable(realm, user);
+        boolean smsAllowed = isSmsUsable(realm, user);
+
+        context.challenge(context.form()
+                .setAttribute("emailAllowed", emailAllowed)
+                .setAttribute("smsAllowed", smsAllowed)
+                .createForm(TEMPLATE_CHANNEL_SELECT));
     }
 
     @Override
@@ -79,7 +86,22 @@ public class OtpChannelChoiceAuthenticator implements Authenticator {
     private void handleChannelSelection(AuthenticationFlowContext context) {
         String channel = context.getHttpRequest().getDecodedFormParameters().getFirst(PARAM_CHANNEL);
         if (channel == null || (!CHANNEL_EMAIL.equals(channel) && !CHANNEL_SMS.equals(channel))) {
-            context.challenge(context.form().setError("otpChannelInvalid").createForm(TEMPLATE_CHANNEL_SELECT));
+            rejectChannelSelection(context);
+            return;
+        }
+
+        // Per-channel verification gate. configuredFor() only requires *some* channel to be
+        // usable — without this re-check, a user verified on one channel could pick the
+        // other (unverified) channel from the selection screen and receive an OTP there.
+        // See SEC-001.
+        RealmModel realm = context.getRealm();
+        UserModel user = context.getUser();
+        if (CHANNEL_EMAIL.equals(channel) && !isEmailUsable(realm, user)) {
+            rejectChannelSelection(context);
+            return;
+        }
+        if (CHANNEL_SMS.equals(channel) && !isSmsUsable(realm, user)) {
+            rejectChannelSelection(context);
             return;
         }
 
@@ -89,6 +111,16 @@ public class OtpChannelChoiceAuthenticator implements Authenticator {
 
         // First send is throttled too — defends against OTP spam via repeated channel-select restarts.
         sendCodeAndChallenge(context, channel);
+    }
+
+    private void rejectChannelSelection(AuthenticationFlowContext context) {
+        boolean emailAllowed = isEmailUsable(context.getRealm(), context.getUser());
+        boolean smsAllowed = isSmsUsable(context.getRealm(), context.getUser());
+        context.challenge(context.form()
+                .setAttribute("emailAllowed", emailAllowed)
+                .setAttribute("smsAllowed", smsAllowed)
+                .setError("otpChannelInvalid")
+                .createForm(TEMPLATE_CHANNEL_SELECT));
     }
 
     private void handleResend(AuthenticationFlowContext context) {
@@ -244,35 +276,45 @@ public class OtpChannelChoiceAuthenticator implements Authenticator {
 
     @Override
     public boolean configuredFor(KeycloakSession session, RealmModel realm, UserModel user) {
-        // Either channel must be usable. Email also needs verification when the realm requires it.
-        boolean emailUsable = user.getEmail() != null;
-        if (emailUsable) {
-            String reqVerified = realm.getAttribute(EmailOtpConst.CONFIG_REQUIRE_VERIFIED_EMAIL);
-            boolean requireVerified = (reqVerified == null || reqVerified.isBlank())
-                    ? EmailOtpConst.DEFAULT_REQUIRE_VERIFIED_EMAIL
-                    : Boolean.parseBoolean(reqVerified);
-            if (requireVerified && !user.isEmailVerified()) {
-                emailUsable = false;
-            }
-        }
+        return isEmailUsable(realm, user) || isSmsUsable(realm, user);
+    }
 
+    /**
+     * Whether Email OTP can be sent to this user under the realm's verification policy.
+     * Shared with {@link #authenticate} and {@link #handleChannelSelection} so eligibility
+     * and per-selection enforcement read the same predicate.
+     */
+    private static boolean isEmailUsable(RealmModel realm, UserModel user) {
+        if (user.getEmail() == null) {
+            return false;
+        }
+        String reqVerified = realm.getAttribute(EmailOtpConst.CONFIG_REQUIRE_VERIFIED_EMAIL);
+        boolean requireVerified = (reqVerified == null || reqVerified.isBlank())
+                ? EmailOtpConst.DEFAULT_REQUIRE_VERIFIED_EMAIL
+                : Boolean.parseBoolean(reqVerified);
+        return !requireVerified || user.isEmailVerified();
+    }
+
+    /**
+     * Whether SMS OTP can be sent to this user under the realm's verification policy.
+     */
+    private static boolean isSmsUsable(RealmModel realm, UserModel user) {
         String phoneAttr = SmsOtpConst.resolvePhoneAttribute(realm);
-        boolean smsUsable = user.getFirstAttribute(phoneAttr) != null;
-        if (smsUsable) {
-            String reqVerified = realm.getAttribute(SmsOtpConst.CONFIG_REQUIRE_VERIFIED_PHONE);
-            boolean requireVerified = (reqVerified == null || reqVerified.isBlank())
-                    ? SmsOtpConst.DEFAULT_REQUIRE_VERIFIED_PHONE
-                    : Boolean.parseBoolean(reqVerified);
-            if (requireVerified) {
-                String verifiedAttr = realm.getAttribute(SmsOtpConst.CONFIG_VERIFIED_PHONE_ATTRIBUTE);
-                if (verifiedAttr == null || verifiedAttr.isBlank()) {
-                    verifiedAttr = SmsOtpConst.DEFAULT_VERIFIED_PHONE_ATTRIBUTE;
-                }
-                smsUsable = "true".equalsIgnoreCase(user.getFirstAttribute(verifiedAttr));
-            }
+        if (user.getFirstAttribute(phoneAttr) == null) {
+            return false;
         }
-
-        return emailUsable || smsUsable;
+        String reqVerified = realm.getAttribute(SmsOtpConst.CONFIG_REQUIRE_VERIFIED_PHONE);
+        boolean requireVerified = (reqVerified == null || reqVerified.isBlank())
+                ? SmsOtpConst.DEFAULT_REQUIRE_VERIFIED_PHONE
+                : Boolean.parseBoolean(reqVerified);
+        if (!requireVerified) {
+            return true;
+        }
+        String verifiedAttr = realm.getAttribute(SmsOtpConst.CONFIG_VERIFIED_PHONE_ATTRIBUTE);
+        if (verifiedAttr == null || verifiedAttr.isBlank()) {
+            verifiedAttr = SmsOtpConst.DEFAULT_VERIFIED_PHONE_ATTRIBUTE;
+        }
+        return "true".equalsIgnoreCase(user.getFirstAttribute(verifiedAttr));
     }
 
     @Override
