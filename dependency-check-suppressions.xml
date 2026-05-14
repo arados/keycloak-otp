@@ -3,17 +3,20 @@
 
     <!--
         False positive: our plugin artifacts (hr.delmisoft.keycloak:keycloak-otp-*)
-        are heuristically matched by OWASP's CPE analyzer against
-        cpe:/a:redhat:keycloak because the artifactIds contain the substring
-        "keycloak". The flagged CVEs (CVE-2014-3651, CVE-2014-3709,
-        CVE-2017-12161) are vulnerabilities in the Keycloak server itself
-        (versions 1.x era), not in our plugin. We don't ship Keycloak — we are
-        a provider deployed into it.
+        are heuristically matched by OWASP's CPE analyzer against any CPE whose
+        product is "keycloak" because the artifactIds contain that substring.
+        Older dependency-check builds emitted cpe:/a:redhat:keycloak; newer ones
+        emit cpe:/a:keycloak:keycloak (different vendor key, same false-positive
+        shape). Both are suppressed below. The flagged CVEs (CVE-2014-3651,
+        CVE-2014-3709, CVE-2017-12161, …) are vulnerabilities in the Keycloak
+        server itself (1.x era), not in our plugin. We don't ship Keycloak — we
+        are a provider deployed into it.
     -->
     <suppress>
         <notes>CPE name-collision: our plugin artifacts are not Keycloak server.</notes>
         <packageUrl regex="true">^pkg:maven/hr\.delmisoft\.keycloak/keycloak-otp-.*$</packageUrl>
         <cpe>cpe:/a:redhat:keycloak</cpe>
+        <cpe>cpe:/a:keycloak:keycloak</cpe>
     </suppress>
 
 </suppressions>
