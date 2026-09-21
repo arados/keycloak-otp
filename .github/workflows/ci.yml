@@ -106,10 +106,41 @@ jobs:
           distribution: temurin
           cache: maven
 
+      # Runners start empty, so without this every run re-downloads the whole NVD
+      # database (~380k records, 10+ min). Restore the newest copy and let the plugin
+      # fetch only the delta. Each run saves under a unique key (cache entries are
+      # immutable) and the restore prefix picks the most recent one; main's caches are
+      # readable from tag runs.
+      - name: Restore NVD data cache
+        id: nvd-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: ~/.dependency-check-data
+          key: dc-data-${{ github.run_id }}
+          restore-keys: dc-data-
+
+      # nvdValidForHours skips the NVD update entirely when the restored data is
+      # fresher than that (default 4h), e.g. a tag pushed right after a main run.
+      # The Sonatype OSS Index analyzer is off: it now answers 401 without an
+      # account, which fails the whole scan. NVD remains the primary data source.
       - name: OWASP Dependency-Check
         env:
           NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
-        run: mvn dependency-check:aggregate -DnvdApiKey="$NVD_API_KEY" -DfailBuildOnCVSS=9 -B
+        run: >
+          mvn dependency-check:aggregate -B
+          -DnvdApiKey="$NVD_API_KEY"
+          -DdataDirectory="$HOME/.dependency-check-data"
+          -DnvdValidForHours=24
+          -DossIndexAnalyzerEnabled=false
+          -DfailBuildOnCVSS=9
+
+      # always(): a scan that fails on a finding has still done the expensive update.
+      - name: Save NVD data cache
+        if: always()
+        uses: actions/cache/save@v6
+        with:
+          path: ~/.dependency-check-data
+          key: dc-data-${{ github.run_id }}
 
       - name: Upload dependency-check report
         if: always()
