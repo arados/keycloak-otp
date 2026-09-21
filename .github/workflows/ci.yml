@@ -121,6 +121,8 @@ jobs:
 
       # nvdValidForHours skips the NVD update entirely when the restored data is
       # fresher than that (default 4h), e.g. a tag pushed right after a main run.
+      # The Sonatype OSS Index analyzer is off: it now answers 401 without an
+      # account, which fails the whole scan. NVD remains the primary data source.
       - name: OWASP Dependency-Check
         env:
           NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
@@ -129,6 +131,7 @@ jobs:
           -DnvdApiKey="$NVD_API_KEY"
           -DdataDirectory="$HOME/.dependency-check-data"
           -DnvdValidForHours=24
+          -DossIndexAnalyzerEnabled=false
           -DfailBuildOnCVSS=9
 
       # always(): a scan that fails on a finding has still done the expensive update.
