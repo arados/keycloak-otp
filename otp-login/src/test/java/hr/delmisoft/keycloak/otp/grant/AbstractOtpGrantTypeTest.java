@@ -2,6 +2,7 @@ package hr.delmisoft.keycloak.otp.grant;
 
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Set;
 import java.util.stream.Stream;
 
 import jakarta.ws.rs.core.MultivaluedMap;
@@ -109,7 +110,7 @@ class AbstractOtpGrantTypeTest {
         when(userProvider.getUserByUsername(any(), any())).thenReturn(user);
         when(singleUseStore.putIfAbsent(anyString(), anyLong())).thenReturn(true);
 
-        // EventBuilder chains. event.error(String) is void in 26.6.1 so it's not stubbed —
+        // EventBuilder chains. event.error(String) is void in 26.7.4 so it's not stubbed —
         // lenient strictness lets the void call pass through silently.
         when(event.detail(anyString(), anyString())).thenReturn(event);
         when(event.user(any(UserModel.class))).thenReturn(event);
@@ -257,7 +258,7 @@ class AbstractOtpGrantTypeTest {
         CorsErrorResponseException ex = assertThrowsCors(() -> grant.process(OtpGrantTestSupport.dummyContext(session)));
 
         assertThat(errorOf(ex), equalTo(OAuthErrorException.INVALID_GRANT));
-        verify(bruteForceProtector).failedLogin(eq(realm), eq(user), eq(clientConnection), any(), eq("test-client"));
+        verify(bruteForceProtector).failedLogin(eq(realm), eq(user), eq(clientConnection), any(), eq(Set.of("test-client")));
         verify(emailProvider, never()).send(anyString(), anyString(), any());
     }
 
@@ -407,7 +408,7 @@ class AbstractOtpGrantTypeTest {
         CorsErrorResponseException ex = assertThrowsCors(() -> grant.process(OtpGrantTestSupport.dummyContext(session)));
 
         assertThat(errorOf(ex), equalTo("emailOtpInvalid"));
-        verify(bruteForceProtector).failedLogin(eq(realm), eq(user), any(), any(), eq("test-client"));
+        verify(bruteForceProtector).failedLogin(eq(realm), eq(user), any(), any(), eq(Set.of("test-client")));
         // attempts counter bumped from 0 to 1
         ArgumentCaptor<Map> capt = ArgumentCaptor.forClass(Map.class);
         verify(singleUseStore).replace(eq("sess"), capt.capture());

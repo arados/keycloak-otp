@@ -3,6 +3,7 @@ package hr.delmisoft.keycloak.otp.grant;
 import java.security.SecureRandom;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 
 import jakarta.ws.rs.core.MediaType;
@@ -189,7 +190,7 @@ public abstract class AbstractOtpGrantType extends OAuth2GrantTypeBase {
         }
         BruteForceProtector bfp = session.getProvider(BruteForceProtector.class);
         if (bfp != null) {
-            bfp.failedLogin(realm, user, clientConnection, session.getContext().getUri(), client.getClientId());
+            bfp.failedLogin(realm, user, clientConnection, session.getContext().getUri(), Set.of(client.getClientId()));
         }
     }
 
@@ -405,6 +406,12 @@ public abstract class AbstractOtpGrantType extends OAuth2GrantTypeBase {
     @Override
     public EventType getEventType() {
         return EventType.LOGIN;
+    }
+
+    /** OTP grants only take short scalar parameters, no long "token" parameters. */
+    @Override
+    public Set<String> getTokenParameterNames() {
+        return Set.of();
     }
 
     // Template methods for subclasses
