@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 Keycloak SPI plugin that adds OTP authentication via **email** and **SMS** channels. Multi-module Maven project producing a single deployable JAR.
 
 - **Keycloak version**: 26.7.4
-- **Java**: 17
+- **Java**: 21
 - **Build system**: Maven (multi-module)
 
 ## Project Structure
