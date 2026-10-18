@@ -110,7 +110,7 @@ class AbstractOtpGrantTypeTest {
         when(userProvider.getUserByUsername(any(), any())).thenReturn(user);
         when(singleUseStore.putIfAbsent(anyString(), anyLong())).thenReturn(true);
 
-        // EventBuilder chains. event.error(String) is void in 26.7.4 so it's not stubbed —
+        // EventBuilder chains. event.error(String) is void in 26.8.1 so it's not stubbed —
         // lenient strictness lets the void call pass through silently.
         when(event.detail(anyString(), anyString())).thenReturn(event);
         when(event.user(any(UserModel.class))).thenReturn(event);
