@@ -168,6 +168,8 @@ public class OtpChannelChoiceAuthenticator implements Authenticator {
             // cooldown can still complete login with the code that was actually sent.
             OtpSendThrottle.RecentCode recent = OtpSendThrottle.getRecentCode(context.getSession(),
                     context.getRealm(), context.getUser(), throttleChannel);
+            // A code that used up its attempts is burned and not returned here; the shared
+            // per-code attempt budget in OtpSendThrottle still applies to a recovered code.
             if (recent != null) {
                 authSession.setAuthNote(AUTH_NOTE_CODE_HASH, recent.codeHash);
                 authSession.setAuthNote(AUTH_NOTE_CODE_SALT, recent.codeSalt);
@@ -260,10 +262,29 @@ public class OtpChannelChoiceAuthenticator implements Authenticator {
             return;
         }
 
+        // The per-session counter above is only a fast path: the authoritative budget is
+        // tied to the delivered code and shared by every auth session (see OtpSendThrottle#
+        // tryConsumeAttempt), so neither Resend, re-selecting the channel, nor a restarted
+        // login can restore guesses.
+        int attemptNo = OtpSendThrottle.tryConsumeAttempt(context.getSession(), context.getRealm(),
+                context.getUser(), throttleChannel, storedHash, maxRetries, expiry);
+        if (attemptNo == 0) {
+            OtpSendThrottle.burnCode(context.getSession(), context.getRealm(), context.getUser(),
+                    throttleChannel, storedHash);
+            authSession.setAuthNote(AUTH_NOTE_ATTEMPTS, String.valueOf(maxRetries));
+            context.failureChallenge(AuthenticationFlowError.INVALID_CREDENTIALS,
+                    context.form().setError(errorMaxRetries).createForm(template));
+            return;
+        }
+
         if (OtpHash.verify(enteredOtp, storedHash, storedSalt)) {
             context.success();
         } else {
-            authSession.setAuthNote(AUTH_NOTE_ATTEMPTS, String.valueOf(attempts + 1));
+            if (attemptNo >= maxRetries) {
+                OtpSendThrottle.burnCode(context.getSession(), context.getRealm(), context.getUser(),
+                        throttleChannel, storedHash);
+            }
+            authSession.setAuthNote(AUTH_NOTE_ATTEMPTS, String.valueOf(Math.max(attempts + 1, attemptNo)));
             context.failureChallenge(AuthenticationFlowError.INVALID_CREDENTIALS,
                     context.form().setError(errorInvalid).createForm(template));
         }

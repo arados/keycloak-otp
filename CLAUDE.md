@@ -90,6 +90,7 @@ themes (no Java dependencies)
 - **Send rate limiting** — `OtpSendThrottle` keyed by `(realmId, userId, channel)`:
   - Browser flow: initial send for a fresh auth session always goes through; explicit **Resend** button and expired-code resends are gated by `sendCooldown` (default 60s)
   - Grant types (`urn:otp:email`/`urn:otp:sms`): every phase-1 send is gated. Throttled requests return **HTTP 429** with `Retry-After` header and JSON body `{error:"otp_send_throttled", retry_after:N}`. Cooldown read from realm attribute `otp.sendCooldown` (default 60s).
+- **Per-code attempt limit (browser flow)** — `maxRetries` is enforced per *delivered code*, not per auth session. Before verifying, authenticators call `OtpSendThrottle.tryConsumeAttempt(...)`, which atomically reserves one of `maxRetries` numbered slot keys (`otp-throttle:{realm}:{user}:{channel}:attempt:{codeHash}:{n}`, via `putIfAbsent`, TTL = code expiry) shared by all sessions. When a code runs out of attempts, `OtpSendThrottle.burnCode(...)` drops it from the recoverable stash so `getRecentCode` returns null. Resend / channel re-select / a restarted login within the cooldown therefore never restores guesses; a new code is only sent once the cooldown allows. A legitimate restart within the cooldown still recovers an un-burned code (with its remaining attempts).
 
 ### Testing
 

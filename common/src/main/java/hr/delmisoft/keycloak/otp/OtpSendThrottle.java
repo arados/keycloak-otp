@@ -1,5 +1,7 @@
 package hr.delmisoft.keycloak.otp;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -150,6 +152,72 @@ public final class OtpSendThrottle {
             return Math.max(0, remaining);
         } catch (NumberFormatException e) {
             return 0;
+        }
+    }
+
+    /**
+     * Atomically reserves one verification attempt against a specific delivered code
+     * (identified by its {@code codeHash}), shared by every auth session for this
+     * (realm, user, channel) tuple. Call it <em>before</em> verifying a submission.
+     *
+     * <p>Attempts are tracked as numbered slot keys
+     * ({@code ...:attempt:{codeHash}:{n}} for {@code n} in {@code 0..maxAttempts-1}) reserved
+     * with {@link SingleUseObjectProvider#putIfAbsent}, so concurrent submissions from any
+     * number of sessions or cluster nodes can never consume more than {@code maxAttempts}
+     * slots — there is no read-modify-write. Slots live until {@code codeExpiresAt}, so
+     * neither a Resend within the cooldown nor a fresh auth session that recovers the
+     * same code via {@link #getRecentCode} can restore the attempt budget.
+     *
+     * @return the 1-based attempt number reserved, or {@code 0} if the code has no attempts
+     *         left (callers must then reject the submission without verifying it)
+     */
+    public static int tryConsumeAttempt(KeycloakSession session, RealmModel realm, UserModel user,
+                                        String channel, String codeHash, int maxAttempts, int codeExpiresAt) {
+        if (codeHash == null || maxAttempts <= 0) {
+            return 0;
+        }
+        SingleUseObjectProvider store = session.getProvider(SingleUseObjectProvider.class);
+        long lifespan = Math.max(1, codeExpiresAt - Time.currentTime());
+        String prefix = buildKey(realm, user, channel) + ":attempt:" + codeHash + ":";
+        for (int n = 0; n < maxAttempts; n++) {
+            if (store.putIfAbsent(prefix + n, lifespan)) {
+                return n + 1;
+            }
+        }
+        return 0;
+    }
+
+    /**
+     * Burns a code that has used up its attempts: if the recoverable stash written by
+     * {@link #tryReserveWithCodeHash} still holds {@code codeHash}, its code fields are
+     * dropped so {@link #getRecentCode} returns {@code null} and no later session (or Resend
+     * within the cooldown) can recover it. The cooldown itself is preserved, so a new code is
+     * only sent once the cooldown allows. A stash holding a different (newer) code is left
+     * untouched. Defense in depth: even if a burned code were recovered, its attempt slots
+     * (see {@link #tryConsumeAttempt}) are exhausted.
+     */
+    public static void burnCode(KeycloakSession session, RealmModel realm, UserModel user,
+                                String channel, String codeHash) {
+        if (codeHash == null) {
+            return;
+        }
+        SingleUseObjectProvider store = session.getProvider(SingleUseObjectProvider.class);
+        String metaKey = buildKey(realm, user, channel) + ":meta";
+        Map<String, String> meta = store.get(metaKey);
+        String stashedHash = meta == null ? null : meta.get(NOTE_CODE_HASH);
+        if (stashedHash == null || !MessageDigest.isEqual(codeHash.getBytes(StandardCharsets.UTF_8),
+                stashedHash.getBytes(StandardCharsets.UTF_8))) {
+            return;
+        }
+        Map<String, String> scrubbed = new HashMap<>(meta);
+        scrubbed.remove(NOTE_CODE_HASH);
+        scrubbed.remove(NOTE_CODE_SALT);
+        scrubbed.remove(NOTE_CODE_EXPIRES_AT);
+        int remainingCooldown = remainingSeconds(session, realm, user, channel);
+        if (remainingCooldown > 0) {
+            store.put(metaKey, remainingCooldown, scrubbed);
+        } else {
+            store.remove(metaKey);
         }
     }
 
