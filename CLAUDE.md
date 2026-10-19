@@ -140,3 +140,20 @@ Security plugins configured in parent `pom.xml` (`pluginManagement`):
 - `dependency-check-maven` — run via `mvn dependency-check:aggregate`
 - SpotBugs exclusion filter: `spotbugs-exclude.xml`
 - Suppressions file: `dependency-check-suppressions.xml`
+
+## Versioning & Releases
+
+Versions are `MAJOR.MINOR.PATCH`, but the parts are **not** used the SemVer way. Bump by what the release contains:
+
+- **MAJOR** — new features (new authenticator, grant type, channel, config option, or other new capability)
+- **MINOR** — Keycloak library update (`keycloak.version` / base image bump)
+- **PATCH** — bug fixes and security fixes, including new settings added only to close a security issue
+
+If a release contains several kinds of change, the highest part wins; lower parts reset to 0 (e.g. 1.3.1 + feature → 2.0.0, 1.3.1 + Keycloak bump → 1.4.0).
+
+Release procedure:
+1. On a branch, set the version in every module: `mvn -P e2e versions:set -DnewVersion=X.Y.Z -DgenerateBackupPoms=false -DprocessAllModules=true`, commit as `Release X.Y.Z`, and open a PR to `main`.
+2. After it is merged, wait for the `main` CI run (it is the only run that includes dependency-check) to pass.
+3. Tag the merge commit with an annotated tag (`git tag -a vX.Y.Z -m "Release X.Y.Z"`) and push it; the `release` job builds the JAR and publishes the GitHub Release.
+
+CI only runs for PRs that target `main`, so avoid stacked PRs: a PR whose base is another feature branch gets no CI, and merging it in GitHub lands it in that branch rather than `main`. Combine dependent changes into one PR or merge them sequentially.
