@@ -156,4 +156,90 @@ public final class OtpSendThrottle {
     private static String buildKey(RealmModel realm, UserModel user, String channel) {
         return KEY_PREFIX + realm.getId() + ":" + user.getId() + ":" + channel;
     }
+
+    // ---------------------------------------------------------------------------------------
+    // Per-(realm, submitted identifier, channel) throttle.
+    //
+    // Used by the public OTP grant types, where every phase-1 request must be throttled the
+    // same way whether or not the submitted username/email resolves to an account — otherwise
+    // the presence or absence of a 429 reveals that the account exists. The key is derived
+    // only from the normalized identifier string the client sent, never from a user id.
+    // ---------------------------------------------------------------------------------------
+
+    private static final String IDENTIFIER_KEY_PREFIX = KEY_PREFIX + "id:";
+
+    /**
+     * Attempt to reserve a send slot for the submitted {@code identifier} (username or email,
+     * as typed). Returns {@code true} if the caller may proceed, {@code false} if a previous
+     * request for the same normalized identifier is still within {@code cooldownSec}.
+     * The identifier is trimmed and lower-cased, matching Keycloak's case-insensitive
+     * username/email lookups, so case variations share one slot.
+     */
+    public static boolean tryReserveForIdentifier(KeycloakSession session, RealmModel realm, String identifier,
+                                                  String channel, int cooldownSec) {
+        if (cooldownSec <= 0) {
+            return true;
+        }
+        SingleUseObjectProvider store = session.getProvider(SingleUseObjectProvider.class);
+        String key = buildIdentifierKey(realm, identifier, channel);
+        if (!store.putIfAbsent(key, cooldownSec)) {
+            return false;
+        }
+        Map<String, String> notes = new HashMap<>();
+        notes.put(NOTE_EXPIRES_AT, String.valueOf(Time.currentTime() + cooldownSec));
+        store.put(key + ":meta", cooldownSec, notes);
+        return true;
+    }
+
+    /**
+     * Remaining cooldown seconds (clamped to 0) for the submitted {@code identifier}.
+     * Returns 0 if there is no active reservation.
+     */
+    public static int remainingSecondsForIdentifier(KeycloakSession session, RealmModel realm, String identifier,
+                                                    String channel) {
+        SingleUseObjectProvider store = session.getProvider(SingleUseObjectProvider.class);
+        Map<String, String> meta = store.get(buildIdentifierKey(realm, identifier, channel) + ":meta");
+        if (meta == null) {
+            return 0;
+        }
+        String expiresAtStr = meta.get(NOTE_EXPIRES_AT);
+        if (expiresAtStr == null) {
+            return 0;
+        }
+        try {
+            return Math.max(0, Integer.parseInt(expiresAtStr) - Time.currentTime());
+        } catch (NumberFormatException e) {
+            return 0;
+        }
+    }
+
+    /**
+     * Releases a reservation taken by {@link #tryReserveForIdentifier}, e.g. when OTP delivery
+     * failed and the caller should be allowed to retry immediately.
+     */
+    public static void releaseIdentifier(KeycloakSession session, RealmModel realm, String identifier,
+                                         String channel) {
+        SingleUseObjectProvider store = session.getProvider(SingleUseObjectProvider.class);
+        String key = buildIdentifierKey(realm, identifier, channel);
+        store.remove(key);
+        store.remove(key + ":meta");
+    }
+
+    /**
+     * {@code otp-throttle:id:<realmId>:<sha256(realmId, normalized identifier, channel)>}.
+     * Hashed so raw usernames / email addresses are not kept in cache keys, and prefixed
+     * distinctly from the per-user key so an identifier can never collide with a user id.
+     */
+    private static String buildIdentifierKey(RealmModel realm, String identifier, String channel) {
+        String normalized = identifier == null ? "" : identifier.trim().toLowerCase(java.util.Locale.ROOT);
+        String material = realm.getId() + "\n" + normalized + "\n" + channel;
+        try {
+            byte[] digest = java.security.MessageDigest.getInstance("SHA-256")
+                    .digest(material.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            return IDENTIFIER_KEY_PREFIX + realm.getId() + ":" + java.util.HexFormat.of().formatHex(digest);
+        } catch (java.security.NoSuchAlgorithmException e) {
+            // SHA-256 is mandatory in every JRE.
+            throw new IllegalStateException("SHA-256 not available", e);
+        }
+    }
 }
