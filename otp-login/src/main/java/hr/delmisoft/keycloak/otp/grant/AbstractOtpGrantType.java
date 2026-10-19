@@ -12,11 +12,13 @@ import jakarta.ws.rs.core.Response;
 import org.keycloak.OAuthErrorException;
 import org.keycloak.authentication.AuthenticationProcessor;
 import org.keycloak.common.util.Time;
+import org.keycloak.credential.hash.PasswordHashProvider;
 import org.keycloak.events.Details;
 import org.keycloak.events.Errors;
 import org.keycloak.events.EventType;
 import org.keycloak.models.AuthenticatedClientSessionModel;
 import org.keycloak.models.ClientSessionContext;
+import org.keycloak.models.PasswordPolicy;
 import org.keycloak.models.SingleUseObjectProvider;
 import org.keycloak.models.UserCredentialModel;
 import org.keycloak.models.UserModel;
@@ -41,10 +43,32 @@ import hr.delmisoft.keycloak.otp.OtpSendThrottle;
  * Handles two-phase OTP flow: request OTP → verify OTP → issue tokens.
  * Password validation is optional — if the password parameter is present, it is validated.
  *
- * <p>The phase-1 response shape for unknown/disabled/unverified users is identical to the
- * success path so the public token endpoint is not an account-enumeration oracle. A fake
- * (never-stored) {@code otp_session_id} is returned in those cases; phase 2 with that id
- * fails with the same generic response a real-but-wrong attempt would produce.
+ * <h2>Account-enumeration resistance</h2>
+ * The token endpoint is public, so no observable part of the response may depend on whether
+ * the submitted username/email belongs to a usable account:
+ * <ul>
+ *   <li>Unknown, disabled, unverified-channel, brute-force-locked and required-actions accounts,
+ *       and requests with a wrong {@code password}, all get the same phase-1 response as a
+ *       successful send — including a syntactically valid but never-stored
+ *       {@code otp_session_id}. No OTP is sent. Phase 2 with that id fails with the same
+ *       generic "OTP session has expired" response a real-but-expired session gets.</li>
+ *   <li>The phase-1 send throttle (HTTP 429) is keyed on the normalized identifier the client
+ *       submitted, not on the resolved user, and is applied before the account is even looked
+ *       up — so unknown usernames are throttled exactly like real ones, and a real account
+ *       reached via a different identifier (email vs username) behaves like an unrelated
+ *       identifier instead of revealing the link with a 429.</li>
+ *   <li>The per-account send cooldown still caps real deliveries; when it blocks a send the
+ *       caller gets the indistinguishable phase-1 response rather than a 429.</li>
+ * </ul>
+ *
+ * <p><b>Residual timing difference:</b> every phase-1 request generates and hashes an OTP and,
+ * when a password is supplied, pays for a password hash (a real verification or a dummy hash
+ * with the realm's algorithm), so the CPU-bound work is comparable. What cannot be equalised
+ * without delaying every response is the latency of actually delivering the OTP (SMTP / SMS
+ * gateway) plus the extra cache writes for the real OTP session; a statistical timing attack
+ * against a slow delivery channel can still distinguish "OTP was sent" from "not sent".
+ * Deployments that need to close that gap should make delivery asynchronous in their
+ * {@code SmsProvider} / mail setup.
  */
 public abstract class AbstractOtpGrantType extends OAuth2GrantTypeBase {
 
@@ -61,7 +85,10 @@ public abstract class AbstractOtpGrantType extends OAuth2GrantTypeBase {
     static final int DEFAULT_TTL = 300;
     static final int DEFAULT_MAX_RETRIES = 3;
 
-    private static final String GENERIC_INVALID_CREDENTIALS = "Invalid user credentials";
+    private static final String SESSION_EXPIRED_DESCRIPTION = "OTP session has expired";
+
+    /** OTP code material prepared up front on every phase-1 request (see class docs, timing). */
+    private record PreparedCode(String code, String salt, String hash, int expiresAt) {}
 
     @Override
     public Response process(Context context) {
@@ -92,84 +119,142 @@ public abstract class AbstractOtpGrantType extends OAuth2GrantTypeBase {
 
         String otp = formParams.getFirst("otp");
         String otpSessionId = formParams.getFirst("otp_session_id");
+        String password = formParams.getFirst("password");
         boolean isPhase2 = otp != null && !otp.isBlank();
 
-        UserModel user = lookupUser(username);
-
-        // Unknown / disabled users get the same response shape as a valid phase-1 send so the
-        // public endpoint does not leak account existence. Phase 2 against the fake session id
-        // returns the generic invalid_grant the wrong-OTP path produces.
-        if (user == null || !user.isEnabled()) {
-            event.error(user == null ? Errors.USER_NOT_FOUND : Errors.USER_DISABLED);
-            return isPhase2 ? indistinguishablePhase2Response() : indistinguishablePhase1Response();
-        }
-
-        event.user(user);
-
-        // Honor Keycloak's brute-force lockout, so the OTP grant cannot be used to
-        // bypass the protections applied to the standard authentication flow.
-        if (realm.isBruteForceProtected()) {
-            BruteForceProtector bfp = session.getProvider(BruteForceProtector.class);
-            if (bfp != null && bfp.isTemporarilyDisabled(session, realm, user)) {
-                event.error(Errors.USER_TEMPORARILY_DISABLED);
-                throw invalidCredentials();
-            }
-        }
-
-        // Channel verification gate. For email, default-on uses Keycloak's native verified flag.
-        // For SMS there is no standard, so the gate is off unless an admin opts in.
-        if (!isChannelVerified(user)) {
+        // Request-shape errors are reported before any account lookup so they cannot differ
+        // between existing and non-existing usernames.
+        if (isPhase2 && (otpSessionId == null || otpSessionId.isBlank())) {
             event.error(Errors.INVALID_USER_CREDENTIALS);
-            return isPhase2 ? indistinguishablePhase2Response() : indistinguishablePhase1Response();
+            throw new CorsErrorResponseException(cors, OAuthErrorException.INVALID_GRANT,
+                    "Missing otp_session_id", Response.Status.UNAUTHORIZED);
         }
 
-        // Validate password if provided
-        String password = formParams.getFirst("password");
-        if (password != null && !password.isEmpty()) {
-            if (!user.credentialManager().isValid(UserCredentialModel.password(password))) {
-                recordBruteForceFailure(user);
-                event.error(Errors.INVALID_USER_CREDENTIALS);
-                throw invalidCredentials();
+        PreparedCode prepared = null;
+        int cooldown = 0;
+        OtpSendThrottle.IpSlot ipSlot = null;
+        if (!isPhase2) {
+            // Generate + hash on every phase-1 request, real account or not, so the fake path
+            // costs the same CPU work as the real one.
+            prepared = prepareCode();
+            cooldown = resolveCooldown();
+            // Per-source-IP cap comes first so a blocked IP never consumes the identifier or
+            // per-user cooldown. Taken before the account lookup, so real and unknown
+            // usernames consume a slot alike and the limit is not an enumeration oracle.
+            ipSlot = OtpSendThrottle.tryReserveIpSlot(session, realm, clientConnection);
+            if (!ipSlot.isAllowed()) {
+                return ipSendLimitedResponse(ipSlot);
+            }
+            // Throttle on the submitted identifier BEFORE looking the account up: every
+            // identifier — existing or not — gets the same 429 on its second request.
+            if (!OtpSendThrottle.tryReserveForIdentifier(session, realm, username, getChannel(), cooldown)) {
+                OtpSendThrottle.releaseIpSlot(session, ipSlot);
+                event.error(Errors.NOT_ALLOWED);
+                return throttledResponse(username);
             }
         }
 
-        // Refuse to issue tokens while the account still has required actions pending —
-        // matches Keycloak's behavior for the standard direct-grant flow.
-        if (user.getRequiredActionsStream().findAny().isPresent()) {
-            event.error(Errors.RESOLVE_REQUIRED_ACTIONS);
-            throw new CorsErrorResponseException(cors, OAuthErrorException.INVALID_GRANT,
-                    "Account is not fully set up", Response.Status.BAD_REQUEST);
+        UserModel user = lookupUser(username);
+        String rejection = checkEligibility(user, password);
+        if (rejection != null) {
+            event.error(rejection);
+            return isPhase2 ? indistinguishablePhase2Response(otpSessionId) : indistinguishablePhase1Response();
         }
 
         if (!isPhase2) {
-            return handlePhase1(user);
+            return handlePhase1(user, username, prepared, cooldown, ipSlot);
         } else {
             return handlePhase2(user, otp, otpSessionId, scope);
         }
     }
 
-    private CorsErrorResponseException invalidCredentials() {
-        return new CorsErrorResponseException(cors, OAuthErrorException.INVALID_GRANT,
-                GENERIC_INVALID_CREDENTIALS, Response.Status.UNAUTHORIZED);
+    /**
+     * Returns {@code null} if the account may proceed with the OTP flow, or the event error
+     * describing why not. All non-null outcomes are answered with the same indistinguishable
+     * response, so the order of checks only affects event logging and the brute-force counter.
+     */
+    private String checkEligibility(UserModel user, String password) {
+        boolean passwordSupplied = password != null && !password.isEmpty();
+        String rejection = null;
+
+        if (user == null) {
+            rejection = Errors.USER_NOT_FOUND;
+        } else if (!user.isEnabled()) {
+            rejection = Errors.USER_DISABLED;
+        } else {
+            event.user(user);
+            if (isBruteForceLocked(user)) {
+                // Honor Keycloak's brute-force lockout, so the OTP grant cannot be used to
+                // bypass the protections applied to the standard authentication flow.
+                rejection = Errors.USER_TEMPORARILY_DISABLED;
+            } else if (!isChannelVerified(user)) {
+                // Channel verification gate. For email, default-on uses Keycloak's native
+                // verified flag. For SMS it is off unless an admin opts in.
+                rejection = Errors.INVALID_USER_CREDENTIALS;
+            }
+        }
+
+        if (passwordSupplied) {
+            if (rejection == null) {
+                if (!user.credentialManager().isValid(UserCredentialModel.password(password))) {
+                    recordBruteForceFailure(user);
+                    rejection = Errors.INVALID_USER_CREDENTIALS;
+                }
+            } else {
+                // Keep the password-hash cost on the rejection path so it is not a timing oracle.
+                burnPasswordHash(password);
+            }
+        }
+
+        // Refuse to proceed while the account still has required actions pending — matches
+        // Keycloak's behavior for the standard direct-grant flow (no tokens are issued).
+        if (rejection == null && user.getRequiredActionsStream().findAny().isPresent()) {
+            rejection = Errors.RESOLVE_REQUIRED_ACTIONS;
+        }
+        return rejection;
+    }
+
+    private boolean isBruteForceLocked(UserModel user) {
+        if (!realm.isBruteForceProtected()) {
+            return false;
+        }
+        BruteForceProtector bfp = session.getProvider(BruteForceProtector.class);
+        return bfp != null && bfp.isTemporarilyDisabled(session, realm, user);
     }
 
     /**
-     * Phase-1 shape returned for unknown/disabled/unverified accounts. Looks exactly like
-     * the success response — including a syntactically valid {@code otp_session_id} — but
-     * no OTP is generated or sent and no session is created. The id will never resolve in
-     * phase 2.
+     * Hashes {@code password} with the realm's configured password-hash algorithm and discards
+     * the result, approximating the cost of a real credential verification.
      */
-    private Response indistinguishablePhase1Response() {
-        // Consume an IP slot exactly like a real send, so a blocked IP gets 429 for unknown
-        // usernames too and the limit cannot be used to tell real accounts from fake ones.
-        OtpSendThrottle.IpSlot ipSlot = OtpSendThrottle.tryReserveIpSlot(session, realm, clientConnection);
-        if (!ipSlot.isAllowed()) {
-            return ipSendLimitedResponse(ipSlot, false);
+    private void burnPasswordHash(String password) {
+        try {
+            PasswordPolicy policy = realm.getPasswordPolicy();
+            String algorithm = policy != null ? policy.getHashAlgorithm() : null;
+            PasswordHashProvider provider = algorithm != null
+                    ? session.getProvider(PasswordHashProvider.class, algorithm) : null;
+            if (provider == null) {
+                provider = session.getProvider(PasswordHashProvider.class);
+            }
+            if (provider != null) {
+                provider.encodedCredential(password, policy != null ? policy.getHashIterations() : -1);
+            }
+        } catch (RuntimeException e) {
+            LOG.debug("Dummy password hash failed", e);
         }
+    }
+
+    private static PreparedCode prepareCode() {
+        String code = generateCode(DEFAULT_CODE_LENGTH);
+        String salt = OtpHash.newSalt();
+        String hash = OtpHash.hash(code, salt);
+        return new PreparedCode(code, salt, hash, (int) (Time.currentTime() + DEFAULT_TTL));
+    }
+
+    private Response otpRequiredResponse(String otpSessionId) {
         Map<String, Object> body = new HashMap<>();
         body.put("error", getOtpRequiredError());
         body.put("error_description", getOtpSentDescription());
-        body.put("otp_session_id", UUID.randomUUID().toString());
+        body.put("otp_session_id", otpSessionId);
         cors.add();
         return Response.status(Response.Status.UNAUTHORIZED)
                 .entity(body)
@@ -177,14 +262,64 @@ public abstract class AbstractOtpGrantType extends OAuth2GrantTypeBase {
                 .build();
     }
 
-    private Response indistinguishablePhase2Response() {
-        // Use the same shape as the real "OTP session has expired" branch so observers cannot
-        // distinguish a fake session id from a real-but-expired one.
+    /**
+     * Phase-1 response for requests that must not (or cannot) send an OTP. Identical to the
+     * success response — including a syntactically valid {@code otp_session_id} — but no OTP
+     * is sent and no session is created, so the id never resolves in phase 2.
+     */
+    private Response indistinguishablePhase1Response() {
+        return otpRequiredResponse(UUID.randomUUID().toString());
+    }
+
+    /**
+     * Generic phase-2 failure, identical to the real "OTP session has expired" outcome. The
+     * submitted session id is consumed (if it exists) on every path that uses this response,
+     * so the session's subsequent state cannot be used as a side channel either.
+     */
+    private Response indistinguishablePhase2Response(String otpSessionId) {
+        if (otpSessionId != null && !otpSessionId.isBlank()) {
+            session.getProvider(SingleUseObjectProvider.class).remove(otpSessionId);
+        }
         Map<String, Object> body = new HashMap<>();
         body.put("error", getSessionExpiredError());
-        body.put("error_description", "OTP session has expired");
+        body.put("error_description", SESSION_EXPIRED_DESCRIPTION);
         cors.add();
         return Response.status(Response.Status.UNAUTHORIZED)
+                .entity(body)
+                .type(MediaType.APPLICATION_JSON_TYPE)
+                .build();
+    }
+
+    private Response throttledResponse(String username) {
+        int retryAfter = Math.max(1,
+                OtpSendThrottle.remainingSecondsForIdentifier(session, realm, username, getChannel()));
+        Map<String, Object> body = new HashMap<>();
+        body.put("error", "otp_send_throttled");
+        body.put("error_description", "Too many OTP send requests. Retry in " + retryAfter + " seconds.");
+        body.put("retry_after", retryAfter);
+        cors.add();
+        return Response.status(429)
+                .header("Retry-After", String.valueOf(retryAfter))
+                .entity(body)
+                .type(MediaType.APPLICATION_JSON_TYPE)
+                .build();
+    }
+
+    /**
+     * 429 for a request blocked by the per-source-IP send limit ({@code otp.ipSendLimit} per
+     * {@code otp.ipSendWindow}). Same shape as the identifier cooldown response.
+     */
+    private Response ipSendLimitedResponse(OtpSendThrottle.IpSlot ipSlot) {
+        int retryAfter = ipSlot.retryAfterSeconds();
+        event.detail(Details.REASON, "otp_ip_send_limit");
+        event.error(Errors.NOT_ALLOWED);
+        Map<String, Object> body = new HashMap<>();
+        body.put("error", "otp_send_throttled");
+        body.put("error_description", "Too many OTP send requests. Retry in " + retryAfter + " seconds.");
+        body.put("retry_after", retryAfter);
+        cors.add();
+        return Response.status(429)
+                .header("Retry-After", String.valueOf(retryAfter))
                 .entity(body)
                 .type(MediaType.APPLICATION_JSON_TYPE)
                 .build();
@@ -201,43 +336,26 @@ public abstract class AbstractOtpGrantType extends OAuth2GrantTypeBase {
     }
 
     /**
-     * Phase 1: Generate and send OTP, return 401 with session ID.
+     * Phase 1: Send the prepared OTP, return 401 with session ID. The per-identifier throttle
+     * has already been reserved by {@link #process}.
      */
-    private Response handlePhase1(UserModel user) {
-        int cooldown = resolveCooldown();
-        String code = generateCode(DEFAULT_CODE_LENGTH);
-        String salt = OtpHash.newSalt();
-        String hash = OtpHash.hash(code, salt);
-        int codeExpiresAt = (int) (Time.currentTime() + DEFAULT_TTL);
-
-        // Per-source-IP cap is checked first so a blocked IP never consumes the user's cooldown.
-        OtpSendThrottle.IpSlot ipSlot = OtpSendThrottle.tryReserveIpSlot(session, realm, clientConnection);
-        if (!ipSlot.isAllowed()) {
-            return ipSendLimitedResponse(ipSlot, true);
-        }
-
+    private Response handlePhase1(UserModel user, String username, PreparedCode prepared, int cooldown,
+                                  OtpSendThrottle.IpSlot ipSlot) {
         if (!OtpSendThrottle.tryReserveWithCodeHash(session, realm, user, getChannel(), cooldown,
-                hash, salt, codeExpiresAt)) {
-            OtpSendThrottle.releaseIpSlot(session, ipSlot);
-            int retryAfter = OtpSendThrottle.remainingSeconds(session, realm, user, getChannel());
+                prepared.hash(), prepared.salt(), prepared.expiresAt())) {
+            // The account-level cooldown is still running from a request made under a different
+            // identifier (email vs username) or from the browser flow. A 429 here would link
+            // that identifier to this account, so answer like any other identifier — without
+            // sending a second OTP. The previously delivered code remains valid.
             event.error(Errors.NOT_ALLOWED);
-            Map<String, Object> body = new HashMap<>();
-            body.put("error", "otp_send_throttled");
-            body.put("error_description", "Too many OTP send requests. Retry in " + retryAfter + " seconds.");
-            body.put("retry_after", retryAfter);
-            cors.add();
-            return Response.status(429)
-                    .header("Retry-After", String.valueOf(retryAfter))
-                    .entity(body)
-                    .type(MediaType.APPLICATION_JSON_TYPE)
-                    .build();
+            return indistinguishablePhase1Response();
         }
 
         String sessionId = UUID.randomUUID().toString();
 
         Map<String, String> notes = new HashMap<>();
-        notes.put(NOTE_CODE_HASH, hash);
-        notes.put(NOTE_CODE_SALT, salt);
+        notes.put(NOTE_CODE_HASH, prepared.hash());
+        notes.put(NOTE_CODE_SALT, prepared.salt());
         notes.put(NOTE_USER_ID, user.getId());
         notes.put(NOTE_CLIENT_ID, client.getClientId());
         notes.put(NOTE_ATTEMPTS, "0");
@@ -246,53 +364,21 @@ public abstract class AbstractOtpGrantType extends OAuth2GrantTypeBase {
         store.put(sessionId, DEFAULT_TTL, notes);
 
         try {
-            sendOtp(user, code);
+            sendOtp(user, prepared.code());
         } catch (Exception e) {
             LOG.error("Failed to send OTP", e);
             // Roll back so a transient delivery error doesn't lock the user out of retries
             // by leaving a cooldown protecting an OTP that was never received.
             store.remove(sessionId);
             OtpSendThrottle.release(session, realm, user, getChannel());
+            OtpSendThrottle.releaseIdentifier(session, realm, username, getChannel());
             OtpSendThrottle.releaseIpSlot(session, ipSlot);
             event.error(Errors.EMAIL_SEND_FAILED);
             throw new CorsErrorResponseException(cors, "otp_send_failed",
                     "Failed to send OTP", Response.Status.INTERNAL_SERVER_ERROR);
         }
 
-        Map<String, Object> body = new HashMap<>();
-        body.put("error", getOtpRequiredError());
-        body.put("error_description", getOtpSentDescription());
-        body.put("otp_session_id", sessionId);
-
-        cors.add();
-        return Response.status(Response.Status.UNAUTHORIZED)
-                .entity(body)
-                .type(MediaType.APPLICATION_JSON_TYPE)
-                .build();
-    }
-
-    /**
-     * 429 for a request blocked by the per-source-IP send limit ({@code otp.ipSendLimit} per
-     * {@code otp.ipSendWindow}). Same shape as the per-user cooldown response.
-     * {@code recordEvent} is false when the caller already recorded an error event for this
-     * request (unknown/disabled/unverified user).
-     */
-    private Response ipSendLimitedResponse(OtpSendThrottle.IpSlot ipSlot, boolean recordEvent) {
-        int retryAfter = ipSlot.retryAfterSeconds();
-        if (recordEvent) {
-            event.detail(Details.REASON, "otp_ip_send_limit");
-            event.error(Errors.NOT_ALLOWED);
-        }
-        Map<String, Object> body = new HashMap<>();
-        body.put("error", "otp_send_throttled");
-        body.put("error_description", "Too many OTP send requests. Retry in " + retryAfter + " seconds.");
-        body.put("retry_after", retryAfter);
-        cors.add();
-        return Response.status(429)
-                .header("Retry-After", String.valueOf(retryAfter))
-                .entity(body)
-                .type(MediaType.APPLICATION_JSON_TYPE)
-                .build();
+        return otpRequiredResponse(sessionId);
     }
 
     /**
@@ -317,30 +403,22 @@ public abstract class AbstractOtpGrantType extends OAuth2GrantTypeBase {
      * Phase 2: Validate OTP and generate token response.
      */
     private Response handlePhase2(UserModel user, String otp, String otpSessionId, String scope) {
-        if (otpSessionId == null || otpSessionId.isBlank()) {
-            event.error(Errors.INVALID_USER_CREDENTIALS);
-            throw new CorsErrorResponseException(cors, OAuthErrorException.INVALID_GRANT,
-                    "Missing otp_session_id", Response.Status.UNAUTHORIZED);
-        }
-
         SingleUseObjectProvider store = session.getProvider(SingleUseObjectProvider.class);
         Map<String, String> rawNotes = store.get(otpSessionId);
 
         if (rawNotes == null) {
             event.error(Errors.INVALID_USER_CREDENTIALS);
-            throw new CorsErrorResponseException(cors, getSessionExpiredError(),
-                    "OTP session has expired", Response.Status.UNAUTHORIZED);
+            return indistinguishablePhase2Response(otpSessionId);
         }
 
         Map<String, String> notes = new HashMap<>(rawNotes);
 
-        // Verify user binding
+        // Verify user binding. Answered (and the session consumed) exactly like a fake session
+        // id, so a session obtained for one account cannot probe whether other usernames exist.
         String storedUserId = notes.get(NOTE_USER_ID);
         if (storedUserId == null || !user.getId().equals(storedUserId)) {
-            store.remove(otpSessionId);
             event.error(Errors.INVALID_USER_CREDENTIALS);
-            throw new CorsErrorResponseException(cors, OAuthErrorException.INVALID_GRANT,
-                    "Invalid OTP session", Response.Status.UNAUTHORIZED);
+            return indistinguishablePhase2Response(otpSessionId);
         }
 
         // Verify client binding — refuse to redeem an OTP session against a different client

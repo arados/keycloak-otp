@@ -56,6 +56,7 @@ class OtpGrantTypeIpLimitTest {
     private static final String IP = "203.0.113.7";
     private static final String IP_KEY_PREFIX = "otp-ip:realm-1:" + IP + ":";
     private static final String USER_KEY_PREFIX = "otp-throttle:";
+    private static final String IDENTIFIER_KEY_PREFIX = "otp-throttle:id:";
 
     @Mock KeycloakSession session;
     @Mock RealmModel realm;
@@ -173,14 +174,29 @@ class OtpGrantTypeIpLimitTest {
     }
 
     @Test
-    void phase1_userCooldownActive_releasesIpSlot() throws Exception {
-        // Nothing is sent when the per-user cooldown blocks, so the IP slot must be given back.
-        when(singleUseStore.putIfAbsent(startsWith(USER_KEY_PREFIX), anyLong())).thenReturn(false);
+    void phase1_identifierThrottled_releasesIpSlot() throws Exception {
+        // The identifier throttle answers 429 for real and unknown usernames alike and nothing
+        // is sent, so the IP slot is given back.
+        when(singleUseStore.putIfAbsent(startsWith(IDENTIFIER_KEY_PREFIX), anyLong())).thenReturn(false);
 
         Response response = grant.process(OtpGrantTestSupport.dummyContext(session));
 
         assertThat(response.getStatus(), equalTo(429));
         verify(singleUseStore).remove(IP_KEY_PREFIX + "0");
+    }
+
+    @Test
+    void phase1_onlyUserCooldownActive_keepsIpSlotLikeFakePath() throws Exception {
+        // When only the per-user cooldown blocks, the grant answers with the fake phase-1 401.
+        // An unknown username consumes an IP slot for that same response, so the real account
+        // must keep its slot too or the remaining IP budget would reveal that it exists.
+        when(singleUseStore.putIfAbsent(startsWith(USER_KEY_PREFIX + "realm-1:"), anyLong())).thenReturn(false);
+
+        Response response = grant.process(OtpGrantTestSupport.dummyContext(session));
+
+        assertThat(response.getStatus(), equalTo(401));
+        verify(emailProvider, never()).send(anyString(), anyString(), any());
+        verify(singleUseStore, never()).remove(IP_KEY_PREFIX + "0");
     }
 
     @Test

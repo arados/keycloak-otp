@@ -79,7 +79,11 @@ test.describe('OTP send rate limiting (passwordless SMS flow, cooldown=5s)', () 
   });
 
   test('clicking resend after cooldown triggers a new SMS send', async ({ page }) => {
-    await page.waitForTimeout(4_000); // outside any prior cooldown
+    // Get fully outside the previous test's 5s cooldown. With only 4s, the login landed right
+    // on the cooldown boundary: remainingSeconds() (whole seconds) already reported 0 while the
+    // cooldown key was still live for a fraction of a second, so the enabled Resend click was
+    // throttled and no new SMS was sent.
+    await page.waitForTimeout(6_000);
 
     await page.goto(accountConsoleUrl());
     await page.waitForSelector('#username', { timeout: 15_000 });

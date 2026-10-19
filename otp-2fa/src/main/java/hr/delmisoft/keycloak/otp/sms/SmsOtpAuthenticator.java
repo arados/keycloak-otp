@@ -90,10 +90,30 @@ public class SmsOtpAuthenticator implements Authenticator {
             return;
         }
 
+        // The per-session counter above is only a fast path: the authoritative budget is
+        // tied to the delivered code and shared by every auth session (see OtpSendThrottle#
+        // tryConsumeAttempt), so neither Resend nor a restarted login can restore guesses.
+        int attemptNo = OtpSendThrottle.tryConsumeAttempt(context.getSession(), context.getRealm(),
+                context.getUser(), OtpSendThrottle.CHANNEL_SMS, storedHash, maxRetries, expiry);
+        if (attemptNo == 0) {
+            OtpSendThrottle.burnCode(context.getSession(), context.getRealm(), context.getUser(),
+                    OtpSendThrottle.CHANNEL_SMS, storedHash);
+            authSession.setAuthNote(SmsOtpConst.AUTH_NOTE_ATTEMPTS, String.valueOf(maxRetries));
+            context.failureChallenge(AuthenticationFlowError.INVALID_CREDENTIALS,
+                    context.form().setError(SmsOtpConst.ERROR_OTP_MAX_RETRIES).createForm(SmsOtpConst.LOGIN_TEMPLATE));
+            return;
+        }
+
         if (OtpHash.verify(enteredOtp, storedHash, storedSalt)) {
             context.success();
         } else {
-            authSession.setAuthNote(SmsOtpConst.AUTH_NOTE_ATTEMPTS, String.valueOf(attempts + 1));
+            if (attemptNo >= maxRetries) {
+                // Last attempt for this code was wrong — burn it so it can never be recovered
+                // into this or any other session.
+                OtpSendThrottle.burnCode(context.getSession(), context.getRealm(), context.getUser(),
+                        OtpSendThrottle.CHANNEL_SMS, storedHash);
+            }
+            authSession.setAuthNote(SmsOtpConst.AUTH_NOTE_ATTEMPTS, String.valueOf(Math.max(attempts + 1, attemptNo)));
             context.failureChallenge(AuthenticationFlowError.INVALID_CREDENTIALS,
                     context.form().setError(SmsOtpConst.ERROR_OTP_INVALID).createForm(SmsOtpConst.LOGIN_TEMPLATE));
         }
@@ -150,6 +170,10 @@ public class SmsOtpAuthenticator implements Authenticator {
             AuthenticationSessionModel authSession = context.getAuthenticationSession();
             OtpSendThrottle.RecentCode recent = OtpSendThrottle.getRecentCode(context.getSession(),
                     context.getRealm(), context.getUser(), OtpSendThrottle.CHANNEL_SMS);
+            // A code that used up its attempts is burned and not returned here. The attempt
+            // note below is a per-session fast path only; the shared per-code budget in
+            // OtpSendThrottle still applies, so earlier failures against this code (from any
+            // session) keep counting.
             if (recent != null) {
                 authSession.setAuthNote(SmsOtpConst.AUTH_NOTE_CODE_HASH, recent.codeHash);
                 authSession.setAuthNote(SmsOtpConst.AUTH_NOTE_CODE_SALT, recent.codeSalt);

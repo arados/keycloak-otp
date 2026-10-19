@@ -158,7 +158,8 @@ class AbstractOtpGrantTypeTest {
 
     @Test
     void phase1_unknownUser_returnsIndistinguishableResponse() throws Exception {
-        // No actual OTP delivery, no throttle reservation — but the response shape mirrors success.
+        // No actual OTP delivery and no OTP session — but the response shape mirrors success,
+        // and the per-identifier send throttle is consumed exactly like for a real account.
         when(userProvider.getUserByUsername(any(), eq("ghost"))).thenReturn(null);
         inject(OtpGrantTestSupport.formParams(Map.of("username", "ghost")));
 
@@ -167,7 +168,8 @@ class AbstractOtpGrantTypeTest {
         assertThat(response.getStatus(), equalTo(401));
         Map<?, ?> body = (Map<?, ?>) response.getEntity();
         assertThat(body.get("otp_session_id"), notNullValue());
-        verify(singleUseStore, never()).putIfAbsent(anyString(), anyLong());
+        verify(singleUseStore).putIfAbsent(anyString(), anyLong());
+        verify(singleUseStore, never()).put(eq((String) body.get("otp_session_id")), anyLong(), any());
         verify(emailProvider, never()).send(anyString(), anyString(), any());
     }
 
@@ -195,7 +197,8 @@ class AbstractOtpGrantTypeTest {
 
         assertThat(response.getStatus(), equalTo(401));
         verify(emailProvider, never()).send(anyString(), anyString(), any());
-        verify(singleUseStore, never()).putIfAbsent(anyString(), anyLong());
+        // Only the per-identifier throttle slot is taken (same as for an unknown username).
+        verify(singleUseStore).putIfAbsent(anyString(), anyLong());
     }
 
     @Test
@@ -218,46 +221,56 @@ class AbstractOtpGrantTypeTest {
     // ---------- Phase 1: brute-force interaction ----------
 
     @Test
-    void phase1_bruteForceLockedUser_isRejectedWithGenericError() throws Exception {
-        // A locked-out user must not learn whether their lockout is what blocked them —
-        // the response is the same generic "Invalid user credentials" the wrong-OTP path returns.
+    void phase1_bruteForceLockedUser_returnsIndistinguishableResponse() throws Exception {
+        // A locked-out account must look exactly like an unknown username: the fake phase-1
+        // response, and no OTP sent.
         when(realm.isBruteForceProtected()).thenReturn(true);
         when(bruteForceProtector.isTemporarilyDisabled(session, realm, user)).thenReturn(true);
         inject(OtpGrantTestSupport.formParams(Map.of("username", "alice")));
 
-        CorsErrorResponseException ex = assertThrowsCors(() -> grant.process(OtpGrantTestSupport.dummyContext(session)));
+        Response response = grant.process(OtpGrantTestSupport.dummyContext(session));
 
-        assertThat(errorOf(ex), equalTo(OAuthErrorException.INVALID_GRANT));
+        assertThat(response.getStatus(), equalTo(401));
+        Map<?, ?> body = (Map<?, ?>) response.getEntity();
+        assertThat(body.get("error"), equalTo("email_otp_required"));
+        assertThat(body.get("otp_session_id"), notNullValue());
         verify(emailProvider, never()).send(anyString(), anyString(), any());
     }
 
     // ---------- Phase 1: required actions ----------
 
     @Test
-    void phase1_userWithRequiredActions_isRejected() throws Exception {
+    void phase1_userWithRequiredActions_returnsIndistinguishableResponse() throws Exception {
+        // Pending required actions must not be revealed (that would confirm the account exists);
+        // no OTP is sent and token issuance stays impossible.
         when(user.getRequiredActionsStream()).thenReturn(Stream.of("UPDATE_PASSWORD"));
         inject(OtpGrantTestSupport.formParams(Map.of("username", "alice")));
 
-        CorsErrorResponseException ex = assertThrowsCors(() -> grant.process(OtpGrantTestSupport.dummyContext(session)));
+        Response response = grant.process(OtpGrantTestSupport.dummyContext(session));
 
-        assertThat(errorOf(ex), equalTo(OAuthErrorException.INVALID_GRANT));
-        assertThat(ex.getErrorDescription(), containsString("not fully set up"));
+        assertThat(response.getStatus(), equalTo(401));
+        Map<?, ?> body = (Map<?, ?>) response.getEntity();
+        assertThat(body.get("otp_session_id"), notNullValue());
         verify(emailProvider, never()).send(anyString(), anyString(), any());
     }
 
     // ---------- Phase 1: password validation when supplied ----------
 
     @Test
-    void phase1_wrongPasswordWhenSupplied_isRejectedAndRecordsBruteForceFailure() throws Exception {
+    void phase1_wrongPasswordWhenSupplied_returnsIndistinguishableResponseAndRecordsBruteForceFailure() throws Exception {
         when(realm.isBruteForceProtected()).thenReturn(true);
         when(credentialManager.isValid(any(UserCredentialModel.class))).thenReturn(false);
         inject(OtpGrantTestSupport.formParams(Map.of(
                 "username", "alice",
                 "password", "wrong")));
 
-        CorsErrorResponseException ex = assertThrowsCors(() -> grant.process(OtpGrantTestSupport.dummyContext(session)));
+        Response response = grant.process(OtpGrantTestSupport.dummyContext(session));
 
-        assertThat(errorOf(ex), equalTo(OAuthErrorException.INVALID_GRANT));
+        // Same shape as an unknown username, so phase 1 is not a password oracle.
+        assertThat(response.getStatus(), equalTo(401));
+        Map<?, ?> body = (Map<?, ?>) response.getEntity();
+        assertThat(body.get("error"), equalTo("email_otp_required"));
+        assertThat(body.get("otp_session_id"), notNullValue());
         verify(bruteForceProtector).failedLogin(eq(realm), eq(user), eq(clientConnection), any(), eq(Set.of("test-client")));
         verify(emailProvider, never()).send(anyString(), anyString(), any());
     }
@@ -348,15 +361,19 @@ class AbstractOtpGrantTypeTest {
                 "otp", "123456",
                 "otp_session_id", "session-x")));
 
-        CorsErrorResponseException ex = assertThrowsCors(() -> grant.process(OtpGrantTestSupport.dummyContext(session)));
+        Response response = grant.process(OtpGrantTestSupport.dummyContext(session));
 
-        assertThat(errorOf(ex), equalTo("emailOtpSessionExpired"));
+        assertThat(response.getStatus(), equalTo(401));
+        Map<?, ?> body = (Map<?, ?>) response.getEntity();
+        assertThat(body.get("error"), equalTo("emailOtpSessionExpired"));
     }
 
     // ---------- Phase 2: user binding ----------
 
     @Test
     void phase2_otpSessionBoundToDifferentUser_isRejected() throws Exception {
+        // Rejected with the same generic "expired" response a fake session id gets, so a
+        // session for one account cannot be used to probe whether other usernames exist.
         Map<String, String> notes = stubStoredSession("other-user-id", "test-client", "0", "123456");
         when(singleUseStore.get("sess")).thenReturn(notes);
 
@@ -365,9 +382,11 @@ class AbstractOtpGrantTypeTest {
                 "otp", "123456",
                 "otp_session_id", "sess")));
 
-        CorsErrorResponseException ex = assertThrowsCors(() -> grant.process(OtpGrantTestSupport.dummyContext(session)));
+        Response response = grant.process(OtpGrantTestSupport.dummyContext(session));
 
-        assertThat(errorOf(ex), equalTo(OAuthErrorException.INVALID_GRANT));
+        assertThat(response.getStatus(), equalTo(401));
+        Map<?, ?> body = (Map<?, ?>) response.getEntity();
+        assertThat(body.get("error"), equalTo("emailOtpSessionExpired"));
         verify(singleUseStore).remove("sess");
     }
 

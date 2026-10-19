@@ -119,10 +119,10 @@ The phone-number user attribute is configured at the **realm** level, not per ex
 
 ### Send Rate Limiting
 
-Both the browser-flow authenticators and the grant types throttle OTP sends per `(realm, user, channel)`, backed by Keycloak's `SingleUseObjectProvider` (cluster-safe).
+Both the browser-flow authenticators and the grant types throttle OTP sends per `(realm, user, channel)`, backed by Keycloak's `SingleUseObjectProvider` (cluster-safe). The grant types additionally throttle per `(realm, submitted username/email, channel)` so the throttle cannot be used to enumerate accounts (see below).
 
 - **Browser flow:** the initial send when a user starts a fresh login always goes through. The **Resend code** button on the OTP form is disabled until `sendCooldown` elapses, then re-enables (a JS countdown drives the UI). Refreshing the OTP page does **not** trigger a new send — the existing valid code in the auth session is re-shown.
-- **Grant types** (`urn:otp:email` / `urn:otp:sms`): every phase-1 send is throttled. A request within the cooldown window returns:
+- **Grant types** (`urn:otp:email` / `urn:otp:sms`): every phase-1 request is throttled on the identifier the client submitted (trimmed, case-insensitive), **whether or not it matches an account** — unknown usernames get the same 429 as real ones. A second request for the same identifier within the cooldown window returns:
 
   ```
   HTTP/1.1 429 Too Many Requests
@@ -130,6 +130,8 @@ Both the browser-flow authenticators and the grant types throttle OTP sends per 
 
   {"error":"otp_send_throttled","error_description":"Too many OTP send requests. Retry in 38 seconds.","retry_after":38}
   ```
+
+  The per-account cooldown still caps real deliveries: if the account was already sent an OTP via a *different* identifier (e.g. its email after its username) or the browser flow, the grant answers with the normal phase-1 `401` response but sends nothing (the earlier code stays valid) — a 429 there would reveal that the two identifiers belong to the same account.
 
   Configure via the realm attribute `otp.sendCooldown` (seconds, default `60`). Set in `realm-export.json`:
 
@@ -176,7 +178,9 @@ Before issuing an OTP, the plugin checks that the destination channel is trusted
 | `smsOtp.verifiedPhoneAttribute` | `phoneNumberVerified` | User attribute name that gates SMS when `requireVerifiedPhone` is enabled. |
 | `smsOtp.phoneAttribute` | `phoneNumber` | User attribute holding the phone number. Used by both the browser flow's `configuredFor` check and the SMS grant type. |
 
-For the custom grant types, an unknown/disabled/unverified account returns the same `401 + email_otp_required/sms_otp_required + otp_session_id` shape as a valid first-phase response, so the public token endpoint is not an account-enumeration oracle. The fake session id never resolves in phase 2.
+For the custom grant types, the public token endpoint is designed not to be an account-enumeration oracle. An unknown, disabled, unverified, brute-force-locked or required-actions-pending account, and a request with a **wrong `password`**, all get the same `401 + email_otp_required/sms_otp_required + otp_session_id` shape as a valid first-phase response (no OTP is sent; the attempt still consumes the send throttle, and a wrong password still counts towards brute-force detection). The fake session id never resolves: phase 2 fails with the same `401 *OtpSessionExpired` "OTP session has expired" response a genuinely expired session gets. Using an `otp_session_id` with a different username also yields that response (and consumes the session).
+
+Residual: OTP generation and hashing, and (when a password is supplied) a password hash, are performed on every request so CPU cost is comparable, but the latency of actually delivering an OTP (SMTP / SMS gateway) can't be hidden. Over many samples, response timing may still hint whether an OTP was sent; make delivery asynchronous if that matters for your threat model.
 
 ## Setup: Browser Flow
 
@@ -242,6 +246,8 @@ curl -X POST "${KEYCLOAK_URL}/realms/${REALM}/protocol/openid-connect/token" \
 ```
 
 On success, returns the standard token response with `access_token`, `refresh_token`, etc.
+
+> A wrong `password` in phase 1 is **not** reported as `invalid_grant` — phase 1 always looks successful (no OTP is delivered, though), and the attempt surfaces as the generic "OTP session has expired" error in phase 2. Clients should treat that error as "start over".
 
 ## Passwordless Authentication
 
