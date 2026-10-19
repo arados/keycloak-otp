@@ -90,6 +90,13 @@ themes (no Java dependencies)
 - **Send rate limiting** — `OtpSendThrottle` keyed by `(realmId, userId, channel)`:
   - Browser flow: initial send for a fresh auth session always goes through; explicit **Resend** button and expired-code resends are gated by `sendCooldown` (default 60s)
   - Grant types (`urn:otp:email`/`urn:otp:sms`): every phase-1 send is gated. Throttled requests return **HTTP 429** with `Retry-After` header and JSON body `{error:"otp_send_throttled", retry_after:N}`. Cooldown read from realm attribute `otp.sendCooldown` (default 60s).
+- **Per-source-IP send limit**: `OtpSendThrottle.tryReserveIpSlot` / `releaseIpSlot`, keyed by `(realmId, client IP)` across all users and both channels (anti SMS-pumping / bombing):
+  - Realm attributes `otp.ipSendLimit` (default 10, `0` disables) and `otp.ipSendWindow` (default 3600s)
+  - Cluster-safe: one of N numbered slot keys `otp-ip:{realm}:{ip}:{slot}` is reserved with `putIfAbsent` and the window as TTL (no read-modify-write counter)
+  - IP from `ClientConnection.getRemoteAddr()` (honors Keycloak proxy config); IPv6 grouped by /64; missing IP is not tracked
+  - Checked **before** the per-user cooldown; IP slot is released when the per-user cooldown blocks or delivery fails
+  - Grant types: same 429 shape as the cooldown. Unknown/disabled/unverified usernames also consume a slot (no enumeration oracle)
+  - Browser: OTP form rendered without sending, error message key `otpSendIpLimited`
 
 ### Testing
 
@@ -112,6 +119,8 @@ mvn verify -P e2e                            # Unit tests + docker up + Playwrig
 The `e2e` Maven module (activated by the `-P e2e` profile) is wired into the standard `pre-integration-test` → `integration-test` → `post-integration-test` → `verify` lifecycle via `maven-antrun-plugin`: it brings up `docker compose`, polls until Keycloak is reachable, runs `npx playwright test`, then tears the stack down regardless of test outcome. A failing test run propagates as a Maven build failure via a recorded exit code in `e2e/target/e2e-exit-code.txt`.
 
 > The demo realm sets `sendCooldown=5s` (and `otp.sendCooldown=5s` for grant types). Long enough that slow CI render delay can't burn through the cooldown before the OTP form is rendered (the disabled-resend-button assertion was flaking at 2s), short enough that the resend E2E tests still exercise the throttled-then-allowed transitions without long waits.
+
+> The whole E2E suite sends every OTP from a single client IP, so the demo realm sets `otp.ipSendLimit=1000` / `otp.ipSendWindow=60` — high enough that the suite never trips the per-IP limit, while still exercising the slot-reservation path against real Keycloak. `otp-ip-limit.spec.js` temporarily lowers the limit via the admin API to assert the 429, then restores the original realm attributes.
 
 E2E tests extract SMS OTP codes from Docker logs (`LogSmsSenderFactory` output) and email OTP codes from Mailpit API.
 

@@ -141,6 +141,30 @@ Both the browser-flow authenticators and the grant types throttle OTP sends per 
   }
   ```
 
+#### Per-source-IP send limit
+
+The per-user cooldown alone does not stop one client from triggering sends for many different accounts (SMS pumping / toll fraud) or from re-sending to one victim once per cooldown forever. On top of it, every send path (browser authenticators and grant types, both channels) is capped per `(realm, client IP)`:
+
+| Realm attribute | Default | Effect |
+|---|---|---|
+| `otp.ipSendLimit` | `10` | Max OTP sends one source IP may trigger per window, across all users and both channels. `0` disables the IP limit. |
+| `otp.ipSendWindow` | `3600` | Window length in seconds. Each send holds one of the `otp.ipSendLimit` slots for this long. |
+
+- The IP limit is checked **before** the per-user cooldown, so a blocked IP never consumes the target user's cooldown. If nothing is sent (the per-user cooldown blocked it, or delivery failed), the IP slot is released again.
+- **Grant types:** a blocked request gets the same `429` / `Retry-After` / `{"error":"otp_send_throttled", "retry_after":N}` response as the per-user cooldown. Phase-1 requests for unknown, disabled or unverified usernames also use up a slot, so the 429 does not reveal whether an account exists.
+- **Browser flow:** the OTP form is shown without sending, with the message `otpSendIpLimited` ("Too many verification codes have been requested from your network…"), and the resend button stays disabled until a slot frees up.
+- The client IP is Keycloak's `ClientConnection.getRemoteAddr()`. **Behind a reverse proxy or load balancer, configure Keycloak's [proxy settings](https://www.keycloak.org/server/reverseproxy) (`proxy-headers`, trusted proxies).** Otherwise every request appears to come from the proxy and all users share one bucket. IPv6 clients are grouped by `/64` prefix.
+- Backed by `SingleUseObjectProvider` (cluster-safe): each send reserves one of N numbered keys `otp-ip:{realm}:{ip}:{slot}` with `putIfAbsent` and the window as TTL. A reservation costs at most `otp.ipSendLimit` store operations, so keep the limit modest. Users behind a shared NAT (offices, carrier-grade NAT) share one bucket; raise the limit if that matters for you.
+
+```json
+{
+  "attributes": {
+    "otp.ipSendLimit": "10",
+    "otp.ipSendWindow": "3600"
+  }
+}
+```
+
 ### Channel verification (security)
 
 Before issuing an OTP, the plugin checks that the destination channel is trusted. The checks default to safe-by-default for email; SMS verification has no Keycloak-native equivalent so it is opt-in.
