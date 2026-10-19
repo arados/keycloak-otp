@@ -150,7 +150,7 @@ class SmsOtpAuthenticatorIpLimitTest {
         authenticator.authenticate(context);
 
         verify(smsProvider, never()).send(anyString(), anyString());
-        verify(singleUseStore).remove(startsWith(IP_KEY_PREFIX));
+        verify(singleUseStore).remove(IP_KEY_PREFIX + "0");
     }
 
     @Test
@@ -159,6 +159,6 @@ class SmsOtpAuthenticatorIpLimitTest {
 
         authenticator.authenticate(context);
 
-        verify(singleUseStore).remove(startsWith(IP_KEY_PREFIX));
+        verify(singleUseStore).remove(IP_KEY_PREFIX + "0");
     }
 }

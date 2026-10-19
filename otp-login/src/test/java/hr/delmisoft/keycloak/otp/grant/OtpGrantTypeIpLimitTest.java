@@ -180,7 +180,7 @@ class OtpGrantTypeIpLimitTest {
         Response response = grant.process(OtpGrantTestSupport.dummyContext(session));
 
         assertThat(response.getStatus(), equalTo(429));
-        verify(singleUseStore).remove(startsWith(IP_KEY_PREFIX));
+        verify(singleUseStore).remove(IP_KEY_PREFIX + "0");
     }
 
     @Test
@@ -191,7 +191,7 @@ class OtpGrantTypeIpLimitTest {
         assertThrows(CorsErrorResponseException.class,
                 () -> grant.process(OtpGrantTestSupport.dummyContext(session)));
 
-        verify(singleUseStore).remove(startsWith(IP_KEY_PREFIX));
+        verify(singleUseStore).remove(IP_KEY_PREFIX + "0");
     }
 
     @Test

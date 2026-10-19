@@ -160,6 +160,12 @@ public abstract class AbstractOtpGrantType extends OAuth2GrantTypeBase {
      * phase 2.
      */
     private Response indistinguishablePhase1Response() {
+        // Consume an IP slot exactly like a real send, so a blocked IP gets 429 for unknown
+        // usernames too and the limit cannot be used to tell real accounts from fake ones.
+        OtpSendThrottle.IpSlot ipSlot = OtpSendThrottle.tryReserveIpSlot(session, realm, clientConnection);
+        if (!ipSlot.isAllowed()) {
+            return ipSendLimitedResponse(ipSlot, false);
+        }
         Map<String, Object> body = new HashMap<>();
         body.put("error", getOtpRequiredError());
         body.put("error_description", getOtpSentDescription());
@@ -204,8 +210,15 @@ public abstract class AbstractOtpGrantType extends OAuth2GrantTypeBase {
         String hash = OtpHash.hash(code, salt);
         int codeExpiresAt = (int) (Time.currentTime() + DEFAULT_TTL);
 
+        // Per-source-IP cap is checked first so a blocked IP never consumes the user's cooldown.
+        OtpSendThrottle.IpSlot ipSlot = OtpSendThrottle.tryReserveIpSlot(session, realm, clientConnection);
+        if (!ipSlot.isAllowed()) {
+            return ipSendLimitedResponse(ipSlot, true);
+        }
+
         if (!OtpSendThrottle.tryReserveWithCodeHash(session, realm, user, getChannel(), cooldown,
                 hash, salt, codeExpiresAt)) {
+            OtpSendThrottle.releaseIpSlot(session, ipSlot);
             int retryAfter = OtpSendThrottle.remainingSeconds(session, realm, user, getChannel());
             event.error(Errors.NOT_ALLOWED);
             Map<String, Object> body = new HashMap<>();
@@ -240,6 +253,7 @@ public abstract class AbstractOtpGrantType extends OAuth2GrantTypeBase {
             // by leaving a cooldown protecting an OTP that was never received.
             store.remove(sessionId);
             OtpSendThrottle.release(session, realm, user, getChannel());
+            OtpSendThrottle.releaseIpSlot(session, ipSlot);
             event.error(Errors.EMAIL_SEND_FAILED);
             throw new CorsErrorResponseException(cors, "otp_send_failed",
                     "Failed to send OTP", Response.Status.INTERNAL_SERVER_ERROR);
@@ -252,6 +266,30 @@ public abstract class AbstractOtpGrantType extends OAuth2GrantTypeBase {
 
         cors.add();
         return Response.status(Response.Status.UNAUTHORIZED)
+                .entity(body)
+                .type(MediaType.APPLICATION_JSON_TYPE)
+                .build();
+    }
+
+    /**
+     * 429 for a request blocked by the per-source-IP send limit ({@code otp.ipSendLimit} per
+     * {@code otp.ipSendWindow}). Same shape as the per-user cooldown response.
+     * {@code recordEvent} is false when the caller already recorded an error event for this
+     * request (unknown/disabled/unverified user).
+     */
+    private Response ipSendLimitedResponse(OtpSendThrottle.IpSlot ipSlot, boolean recordEvent) {
+        int retryAfter = ipSlot.retryAfterSeconds();
+        if (recordEvent) {
+            event.detail(Details.REASON, "otp_ip_send_limit");
+            event.error(Errors.NOT_ALLOWED);
+        }
+        Map<String, Object> body = new HashMap<>();
+        body.put("error", "otp_send_throttled");
+        body.put("error_description", "Too many OTP send requests. Retry in " + retryAfter + " seconds.");
+        body.put("retry_after", retryAfter);
+        cors.add();
+        return Response.status(429)
+                .header("Retry-After", String.valueOf(retryAfter))
                 .entity(body)
                 .type(MediaType.APPLICATION_JSON_TYPE)
                 .build();

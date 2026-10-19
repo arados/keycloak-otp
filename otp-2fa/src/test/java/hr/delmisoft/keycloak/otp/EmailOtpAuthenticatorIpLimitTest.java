@@ -151,7 +151,7 @@ class EmailOtpAuthenticatorIpLimitTest {
         authenticator.authenticate(context);
 
         verify(emailProvider, never()).send(anyString(), anyString(), any());
-        verify(singleUseStore).remove(startsWith(IP_KEY_PREFIX));
+        verify(singleUseStore).remove(IP_KEY_PREFIX + "0");
     }
 
     @Test
@@ -160,6 +160,6 @@ class EmailOtpAuthenticatorIpLimitTest {
 
         authenticator.authenticate(context);
 
-        verify(singleUseStore).remove(startsWith(IP_KEY_PREFIX));
+        verify(singleUseStore).remove(IP_KEY_PREFIX + "0");
     }
 }

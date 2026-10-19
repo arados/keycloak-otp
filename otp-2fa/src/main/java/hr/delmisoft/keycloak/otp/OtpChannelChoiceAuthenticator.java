@@ -145,8 +145,19 @@ public class OtpChannelChoiceAuthenticator implements Authenticator {
         String hash = OtpHash.hash(code, salt);
         int codeExpiresAt = Time.currentTime() + ttl;
 
+        // Per-source-IP cap is checked first so a blocked IP never consumes the user's cooldown.
+        OtpSendThrottle.IpSlot ipSlot = OtpSendThrottle.tryReserveIpSlot(context.getSession(),
+                context.getRealm(), context.getConnection());
+        if (!ipSlot.isAllowed()) {
+            challengeIpLimited(context, ipSlot, throttleChannel, template);
+            return;
+        }
+
         boolean canSend = OtpSendThrottle.tryReserveWithCodeHash(context.getSession(), context.getRealm(),
                 context.getUser(), throttleChannel, cooldown, hash, salt, codeExpiresAt);
+        if (!canSend) {
+            OtpSendThrottle.releaseIpSlot(context.getSession(), ipSlot);
+        }
 
         AuthenticationSessionModel authSession = context.getAuthenticationSession();
         if (canSend) {
@@ -158,6 +169,7 @@ public class OtpChannelChoiceAuthenticator implements Authenticator {
 
             boolean sent = CHANNEL_EMAIL.equals(channel) ? sendEmail(context, code) : sendSms(context, code);
             if (!sent) {
+                OtpSendThrottle.releaseIpSlot(context.getSession(), ipSlot);
                 OtpSendThrottle.release(context.getSession(), context.getRealm(), context.getUser(), throttleChannel);
                 clearCodeNotes(authSession);
                 return;
@@ -180,6 +192,17 @@ public class OtpChannelChoiceAuthenticator implements Authenticator {
                 context.getUser(), throttleChannel);
         context.challenge(context.form()
                 .setAttribute("resendAvailableInSeconds", remaining)
+                .createForm(template));
+    }
+
+    /** OTP form without sending: the per-source-IP send limit is exhausted. */
+    private void challengeIpLimited(AuthenticationFlowContext context, OtpSendThrottle.IpSlot ipSlot,
+                                    String throttleChannel, String template) {
+        int remaining = OtpSendThrottle.remainingSeconds(context.getSession(), context.getRealm(),
+                context.getUser(), throttleChannel);
+        context.challenge(context.form()
+                .setAttribute("resendAvailableInSeconds", Math.max(remaining, ipSlot.retryAfterSeconds()))
+                .setError(OtpSendThrottle.ERROR_IP_SEND_LIMITED)
                 .createForm(template));
     }
 
@@ -229,8 +252,17 @@ public class OtpChannelChoiceAuthenticator implements Authenticator {
             String newSalt = OtpHash.newSalt();
             String newHash = OtpHash.hash(newCode, newSalt);
             int codeExpiresAt = Time.currentTime() + ttl;
+            OtpSendThrottle.IpSlot ipSlot = OtpSendThrottle.tryReserveIpSlot(context.getSession(),
+                    context.getRealm(), context.getConnection());
+            if (!ipSlot.isAllowed()) {
+                challengeIpLimited(context, ipSlot, throttleChannel, template);
+                return;
+            }
             boolean reserved = OtpSendThrottle.tryReserveWithCodeHash(context.getSession(), context.getRealm(),
                     context.getUser(), throttleChannel, cooldown, newHash, newSalt, codeExpiresAt);
+            if (!reserved) {
+                OtpSendThrottle.releaseIpSlot(context.getSession(), ipSlot);
+            }
             if (reserved) {
                 authSession.setAuthNote(AUTH_NOTE_CODE_HASH, newHash);
                 authSession.setAuthNote(AUTH_NOTE_CODE_SALT, newSalt);
@@ -239,6 +271,7 @@ public class OtpChannelChoiceAuthenticator implements Authenticator {
                 authSession.setAuthNote(AUTH_NOTE_LAST_SENT, String.valueOf(Time.currentTime()));
                 boolean sent = CHANNEL_EMAIL.equals(channel) ? sendEmail(context, newCode) : sendSms(context, newCode);
                 if (!sent) {
+                    OtpSendThrottle.releaseIpSlot(context.getSession(), ipSlot);
                     OtpSendThrottle.release(context.getSession(), context.getRealm(), context.getUser(), throttleChannel);
                     clearCodeNotes(authSession);
                     return;
