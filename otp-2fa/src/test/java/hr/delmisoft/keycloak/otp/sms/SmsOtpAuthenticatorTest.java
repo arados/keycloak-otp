@@ -150,6 +150,8 @@ class SmsOtpAuthenticatorTest {
         MultivaluedMap<String, String> formParams = new MultivaluedHashMap<>();
         formParams.putSingle(SmsOtpConst.PARAM_OTP, "123456");
 
+        // Verification consumes a per-code attempt slot in the shared store.
+        setupCommonMocks();
         when(context.getHttpRequest()).thenReturn(httpRequest);
         when(httpRequest.getDecodedFormParameters()).thenReturn(formParams);
         when(context.getAuthenticationSession()).thenReturn(authSession);
@@ -166,6 +168,8 @@ class SmsOtpAuthenticatorTest {
         MultivaluedMap<String, String> formParams = new MultivaluedHashMap<>();
         formParams.putSingle(SmsOtpConst.PARAM_OTP, "999999");
 
+        // Verification consumes a per-code attempt slot in the shared store.
+        setupCommonMocks();
         when(context.getHttpRequest()).thenReturn(httpRequest);
         when(httpRequest.getDecodedFormParameters()).thenReturn(formParams);
         when(context.getAuthenticationSession()).thenReturn(authSession);
