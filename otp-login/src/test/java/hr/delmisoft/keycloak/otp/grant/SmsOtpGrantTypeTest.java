@@ -110,9 +110,9 @@ class SmsOtpGrantTypeTest {
         when(realm.getAttribute("smsOtp.phoneAttribute")).thenReturn(null);
         when(user.getFirstAttribute("phoneNumber")).thenReturn("+1234567890");
 
-        Method sendOtp = AbstractOtpGrantType.class.getDeclaredMethod("sendOtp", UserModel.class, String.class);
+        Method sendOtp = AbstractOtpGrantType.class.getDeclaredMethod("sendOtp", KeycloakSession.class, RealmModel.class, UserModel.class, String.class);
         sendOtp.setAccessible(true);
-        sendOtp.invoke(grant, user, "123456");
+        sendOtp.invoke(grant, session, realm, user, "123456");
 
         verify(smsProvider).send("+1234567890", "Your verification code is: 123456");
     }
@@ -122,11 +122,11 @@ class SmsOtpGrantTypeTest {
         when(realm.getAttribute("smsOtp.phoneAttribute")).thenReturn(null);
         when(user.getFirstAttribute("phoneNumber")).thenReturn(null);
 
-        Method sendOtp = AbstractOtpGrantType.class.getDeclaredMethod("sendOtp", UserModel.class, String.class);
+        Method sendOtp = AbstractOtpGrantType.class.getDeclaredMethod("sendOtp", KeycloakSession.class, RealmModel.class, UserModel.class, String.class);
         sendOtp.setAccessible(true);
 
         InvocationTargetException ex = org.junit.jupiter.api.Assertions.assertThrows(
-                InvocationTargetException.class, () -> sendOtp.invoke(grant, user, "123456"));
+                InvocationTargetException.class, () -> sendOtp.invoke(grant, session, realm, user, "123456"));
         assertThat(ex.getCause().getMessage(), containsString("no phone number"));
     }
 
@@ -136,11 +136,11 @@ class SmsOtpGrantTypeTest {
         when(user.getFirstAttribute("phoneNumber")).thenReturn("+1234567890");
         doThrow(new SmsException("twilio is down")).when(smsProvider).send(anyString(), anyString());
 
-        Method sendOtp = AbstractOtpGrantType.class.getDeclaredMethod("sendOtp", UserModel.class, String.class);
+        Method sendOtp = AbstractOtpGrantType.class.getDeclaredMethod("sendOtp", KeycloakSession.class, RealmModel.class, UserModel.class, String.class);
         sendOtp.setAccessible(true);
 
         InvocationTargetException ex = org.junit.jupiter.api.Assertions.assertThrows(
-                InvocationTargetException.class, () -> sendOtp.invoke(grant, user, "123456"));
+                InvocationTargetException.class, () -> sendOtp.invoke(grant, session, realm, user, "123456"));
         assertThat(ex.getCause(), org.hamcrest.Matchers.instanceOf(SmsException.class));
     }
 

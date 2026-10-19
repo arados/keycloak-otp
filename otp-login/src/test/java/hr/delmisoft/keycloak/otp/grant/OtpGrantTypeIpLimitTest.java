@@ -19,7 +19,6 @@ import org.keycloak.models.RealmModel;
 import org.keycloak.models.SingleUseObjectProvider;
 import org.keycloak.models.UserModel;
 import org.keycloak.models.UserProvider;
-import org.keycloak.services.CorsErrorResponseException;
 import org.keycloak.services.cors.Cors;
 import org.keycloak.services.managers.BruteForceProtector;
 import org.mockito.Mock;
@@ -33,7 +32,6 @@ import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.greaterThan;
 import static org.hamcrest.Matchers.notNullValue;
-import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -73,6 +71,7 @@ class OtpGrantTypeIpLimitTest {
     @Mock KeycloakContext keycloakContext;
 
     private AbstractOtpGrantTypeTest.TestableEmailOtpGrantType grant;
+    private OtpGrantTestSupport.AsyncDeliveryHarness async;
 
     @BeforeEach
     void setUp() {
@@ -101,6 +100,8 @@ class OtpGrantTypeIpLimitTest {
         when(user.getRequiredActionsStream()).thenReturn(Stream.empty());
 
         when(userProvider.getUserByUsername(any(), any())).thenReturn(user);
+        when(userProvider.getUserById(any(), eq("user-1"))).thenReturn(user);
+        async = OtpGrantTestSupport.AsyncDeliveryHarness.install(session, session, realm, "realm-1");
         when(clientConnection.getRemoteAddr()).thenReturn(IP);
         when(singleUseStore.putIfAbsent(anyString(), anyLong())).thenReturn(true);
 
@@ -122,6 +123,7 @@ class OtpGrantTypeIpLimitTest {
         assertThat(response.getStatus(), equalTo(401));
         verify(singleUseStore).putIfAbsent(startsWith(IP_KEY_PREFIX),
                 eq((long) OtpSendThrottle.DEFAULT_IP_SEND_WINDOW));
+        async.completeRequest();
         verify(emailProvider).send(anyString(), anyString(), any());
     }
 
@@ -144,6 +146,7 @@ class OtpGrantTypeIpLimitTest {
         ipLimitReached();
 
         grant.process(OtpGrantTestSupport.dummyContext(session));
+        async.completeRequest();
 
         verify(emailProvider, never()).send(anyString(), anyString(), any());
         verify(singleUseStore, never()).putIfAbsent(startsWith(USER_KEY_PREFIX), anyLong());
@@ -193,6 +196,7 @@ class OtpGrantTypeIpLimitTest {
         when(singleUseStore.putIfAbsent(startsWith(USER_KEY_PREFIX + "realm-1:"), anyLong())).thenReturn(false);
 
         Response response = grant.process(OtpGrantTestSupport.dummyContext(session));
+        async.completeRequest();
 
         assertThat(response.getStatus(), equalTo(401));
         verify(emailProvider, never()).send(anyString(), anyString(), any());
@@ -204,9 +208,12 @@ class OtpGrantTypeIpLimitTest {
         doThrow(new RuntimeException("smtp down"))
                 .when(emailProvider).send(anyString(), anyString(), any());
 
-        assertThrows(CorsErrorResponseException.class,
-                () -> grant.process(OtpGrantTestSupport.dummyContext(session)));
+        Response response = grant.process(OtpGrantTestSupport.dummyContext(session));
+        assertThat(response.getStatus(), equalTo(401));
+        verify(singleUseStore, never()).remove(IP_KEY_PREFIX + "0");
 
+        // Delivery fails asynchronously; the slot is handed back once it does.
+        async.completeRequest();
         verify(singleUseStore).remove(IP_KEY_PREFIX + "0");
     }
 
@@ -219,6 +226,7 @@ class OtpGrantTypeIpLimitTest {
 
         assertThat(response.getStatus(), equalTo(401));
         verify(singleUseStore, never()).putIfAbsent(startsWith("otp-ip:"), anyLong());
+        async.completeRequest();
         verify(emailProvider).send(anyString(), anyString(), any());
     }
 }

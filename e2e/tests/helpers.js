@@ -32,22 +32,48 @@ async function getEmailOtpCode(page, { timeoutMs = 15_000 } = {}) {
   throw new Error('Timed out waiting for OTP email');
 }
 
-/**
- * Fetch the latest SMS OTP code from Keycloak docker logs.
- * The LogSmsSenderFactory logs: "SMS to +...: Your verification code is: XXXXXX"
- */
-async function getSmsOtpCodeFromLogs() {
+const SMS_CODE_PATTERN = /Your verification code is:\s*(\d{6})/g;
+
+function readKeycloakLogs(tail) {
   const { execSync } = require('child_process');
-  const logs = execSync('docker compose logs keycloak --tail=20 2>&1', {
+  const tailArg = tail ? ` --tail=${tail}` : '';
+  return execSync(`docker compose logs keycloak${tailArg} 2>&1`, {
     cwd: require('path').resolve(__dirname, '../..'),
     encoding: 'utf-8',
   });
-  const lines = logs.split('\n').reverse();
-  for (const line of lines) {
-    const match = line.match(/Your verification code is:\s*(\d{6})/);
-    if (match) return match[1];
+}
+
+/**
+ * Count how many SMS OTP codes the LogSmsSenderFactory has logged so far. Pass the result as
+ * `afterCount` to getSmsOtpCodeFromLogs to wait for a code sent after that point.
+ */
+function countSmsSends() {
+  return [...readKeycloakLogs().matchAll(SMS_CODE_PATTERN)].length;
+}
+
+/**
+ * Fetch the latest SMS OTP code from Keycloak docker logs.
+ * The LogSmsSenderFactory logs: "SMS to +...: Your verification code is: XXXXXX"
+ *
+ * Polls, because the OTP grant types deliver codes asynchronously (the code is logged shortly
+ * after the phase-1 401). With `afterCount`, waits until more than that many codes have been
+ * logged and returns the newest one, so a code left over from an earlier send is never used.
+ */
+async function getSmsOtpCodeFromLogs({ afterCount, timeoutMs = 15_000 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const codes = afterCount === undefined
+      ? [...readKeycloakLogs(20).matchAll(SMS_CODE_PATTERN)]
+      : [...readKeycloakLogs().matchAll(SMS_CODE_PATTERN)];
+    const fresh = afterCount === undefined ? codes.length > 0 : codes.length > afterCount;
+    if (fresh) {
+      return codes[codes.length - 1][1];
+    }
+    if (Date.now() >= deadline) {
+      throw new Error('Could not find SMS OTP code in Keycloak logs');
+    }
+    await new Promise((r) => setTimeout(r, 250));
   }
-  throw new Error('Could not find SMS OTP code in Keycloak logs');
 }
 
 /**
@@ -74,6 +100,7 @@ module.exports = {
   TEST_PASSWORD,
   getEmailOtpCode,
   getSmsOtpCodeFromLogs,
+  countSmsSends,
   clearMailpit,
   accountConsoleUrl,
 };
