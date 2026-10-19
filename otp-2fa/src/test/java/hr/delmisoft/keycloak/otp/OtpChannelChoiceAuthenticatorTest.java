@@ -7,6 +7,7 @@ import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.Response;
 
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -36,11 +37,15 @@ import hr.delmisoft.keycloak.otp.OtpHash;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.notNullValue;
+import static org.hamcrest.Matchers.nullValue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.clearInvocations;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -285,6 +290,8 @@ class OtpChannelChoiceAuthenticatorTest {
     void action_validEmailOtp_succeeds() {
         MultivaluedMap<String, String> formParams = new MultivaluedHashMap<>();
         formParams.putSingle(OtpChannelChoiceAuthenticator.PARAM_OTP, "123456");
+        // Verification consumes a per-code attempt slot in the shared store.
+        setupCommonMocks();
         when(context.getHttpRequest()).thenReturn(httpRequest);
         when(httpRequest.getDecodedFormParameters()).thenReturn(formParams);
         when(context.getAuthenticationSession()).thenReturn(authSession);
@@ -300,6 +307,8 @@ class OtpChannelChoiceAuthenticatorTest {
     void action_validSmsOtp_succeeds() {
         MultivaluedMap<String, String> formParams = new MultivaluedHashMap<>();
         formParams.putSingle(OtpChannelChoiceAuthenticator.PARAM_OTP, "654321");
+        // Verification consumes a per-code attempt slot in the shared store.
+        setupCommonMocks();
         when(context.getHttpRequest()).thenReturn(httpRequest);
         when(httpRequest.getDecodedFormParameters()).thenReturn(formParams);
         when(context.getAuthenticationSession()).thenReturn(authSession);
@@ -315,6 +324,8 @@ class OtpChannelChoiceAuthenticatorTest {
     void action_invalidOtp_incrementsAttemptsAndFails() {
         MultivaluedMap<String, String> formParams = new MultivaluedHashMap<>();
         formParams.putSingle(OtpChannelChoiceAuthenticator.PARAM_OTP, "999999");
+        // Verification consumes a per-code attempt slot in the shared store.
+        setupCommonMocks();
         when(context.getHttpRequest()).thenReturn(httpRequest);
         when(httpRequest.getDecodedFormParameters()).thenReturn(formParams);
         when(context.getAuthenticationSession()).thenReturn(authSession);
@@ -635,5 +646,198 @@ class OtpChannelChoiceAuthenticatorTest {
         when(user.isEmailVerified()).thenReturn(false);
         when(user.getFirstAttribute(SmsOtpConst.DEFAULT_PHONE_ATTRIBUTE)).thenReturn(null);
         assertThat(authenticator.configuredFor(session, realm, user), equalTo(false));
+    }
+
+    // --- Retry-limit bypass regression: failures are counted per delivered code ---
+
+    private OtpTestSupport.InMemorySingleUseObjectProvider sharedStore;
+    private MultivaluedMap<String, String> flowParams;
+    private final java.util.List<String> sentCodes = new java.util.ArrayList<>();
+
+    @AfterEach
+    void resetTimeOffset() {
+        Time.setOffset(0);
+    }
+
+    private void setupStatefulFlow() throws Exception {
+        sharedStore = new OtpTestSupport.InMemorySingleUseObjectProvider();
+        flowParams = new MultivaluedHashMap<>();
+        when(context.getSession()).thenReturn(session);
+        when(context.getRealm()).thenReturn(realm);
+        when(context.getUser()).thenReturn(user);
+        when(context.getAuthenticatorConfig()).thenReturn(null);
+        when(context.getHttpRequest()).thenReturn(httpRequest);
+        when(httpRequest.getDecodedFormParameters()).thenReturn(flowParams);
+        when(session.getProvider(EmailTemplateProvider.class)).thenReturn(emailProvider);
+        when(emailProvider.setRealm(any())).thenReturn(emailProvider);
+        when(emailProvider.setUser(any())).thenReturn(emailProvider);
+        when(session.getProvider(SmsProvider.class)).thenReturn(smsProvider);
+        when(session.getProvider(SingleUseObjectProvider.class)).thenReturn(sharedStore);
+        when(realm.getId()).thenReturn("realm-1");
+        when(user.getId()).thenReturn("user-1");
+        when(user.getFirstAttribute(SmsOtpConst.DEFAULT_PHONE_ATTRIBUTE)).thenReturn("+1234567890");
+        when(user.getFirstAttribute(SmsOtpConst.DEFAULT_VERIFIED_PHONE_ATTRIBUTE)).thenReturn("true");
+        when(user.getEmail()).thenReturn("test@example.com");
+        when(user.isEmailVerified()).thenReturn(true);
+        doAnswer(inv -> {
+            String message = inv.getArgument(1);
+            sentCodes.add(message.substring(message.lastIndexOf(' ') + 1));
+            return null;
+        }).when(smsProvider).send(anyString(), anyString());
+        doAnswer(inv -> {
+            Map<String, Object> attrs = inv.getArgument(2);
+            sentCodes.add((String) attrs.get("code"));
+            return null;
+        }).when(emailProvider).send(anyString(), anyString(), any());
+        when(context.form()).thenReturn(form);
+        when(form.setAttribute(anyString(), any())).thenReturn(form);
+        when(form.setError(anyString())).thenReturn(form);
+        when(form.createForm(anyString())).thenReturn(formResponse);
+    }
+
+    private void post(AuthenticationSessionModel s, String param, String value) {
+        when(context.getAuthenticationSession()).thenReturn(s);
+        flowParams.clear();
+        flowParams.putSingle(param, value);
+        clearInvocations(context, form);
+        authenticator.action(context);
+    }
+
+    private void selectChannel(AuthenticationSessionModel s, String channel) {
+        when(context.getAuthenticationSession()).thenReturn(s);
+        clearInvocations(context, form);
+        authenticator.authenticate(context);
+        post(s, OtpChannelChoiceAuthenticator.PARAM_CHANNEL, channel);
+    }
+
+    private String submit(AuthenticationSessionModel s, String otp) {
+        post(s, OtpChannelChoiceAuthenticator.PARAM_OTP, otp);
+        return OtpTestSupport.outcome(context, form);
+    }
+
+    private void resend(AuthenticationSessionModel s) {
+        post(s, OtpChannelChoiceAuthenticator.PARAM_RESEND, "true");
+    }
+
+    private void assertResendAfterMaxRetriesDoesNotGrantMoreGuesses(String channel, String errInvalid,
+                                                                    String errMaxRetries) throws Exception {
+        setupStatefulFlow();
+        AuthenticationSessionModel a = OtpTestSupport.statefulAuthSession(new HashMap<>());
+        selectChannel(a, channel);
+        assertThat(sentCodes.size(), equalTo(1));
+        String code = sentCodes.get(0);
+        String wrong = OtpTestSupport.wrongCodeFor(code);
+
+        for (int i = 0; i < 3; i++) {
+            assertThat(submit(a, wrong), equalTo(errInvalid));
+        }
+        assertThat(submit(a, wrong), equalTo(errMaxRetries));
+
+        resend(a);
+        assertThat(sentCodes.size(), equalTo(1));
+        assertThat(submit(a, wrong), equalTo(errMaxRetries));
+        assertThat(submit(a, code), not(equalTo(OtpTestSupport.SUCCESS)));
+    }
+
+    @Test
+    void sms_resendAfterMaxRetries_doesNotGrantMoreGuesses() throws Exception {
+        assertResendAfterMaxRetriesDoesNotGrantMoreGuesses(OtpChannelChoiceAuthenticator.CHANNEL_SMS,
+                SmsOtpConst.ERROR_OTP_INVALID, SmsOtpConst.ERROR_OTP_MAX_RETRIES);
+    }
+
+    @Test
+    void email_resendAfterMaxRetries_doesNotGrantMoreGuesses() throws Exception {
+        assertResendAfterMaxRetriesDoesNotGrantMoreGuesses(OtpChannelChoiceAuthenticator.CHANNEL_EMAIL,
+                EmailOtpConst.ERROR_OTP_INVALID, EmailOtpConst.ERROR_OTP_MAX_RETRIES);
+    }
+
+    @Test
+    void reselectChannelAfterMaxRetries_doesNotGrantMoreGuesses() throws Exception {
+        // Re-posting channel=sms within the same auth session also goes through the
+        // throttled-recovery path; it must not reset the attempt budget either.
+        setupStatefulFlow();
+        AuthenticationSessionModel a = OtpTestSupport.statefulAuthSession(new HashMap<>());
+        selectChannel(a, OtpChannelChoiceAuthenticator.CHANNEL_SMS);
+        String code = sentCodes.get(0);
+        String wrong = OtpTestSupport.wrongCodeFor(code);
+        for (int i = 0; i < 3; i++) {
+            submit(a, wrong);
+        }
+
+        post(a, OtpChannelChoiceAuthenticator.PARAM_CHANNEL, OtpChannelChoiceAuthenticator.CHANNEL_SMS);
+        assertThat(sentCodes.size(), equalTo(1));
+        assertThat(submit(a, code), not(equalTo(OtpTestSupport.SUCCESS)));
+    }
+
+    @Test
+    void newSessionWithinCooldown_sharesFailureCounterForSameCode() throws Exception {
+        setupStatefulFlow();
+        AuthenticationSessionModel a = OtpTestSupport.statefulAuthSession(new HashMap<>());
+        selectChannel(a, OtpChannelChoiceAuthenticator.CHANNEL_SMS);
+        String code = sentCodes.get(0);
+        String wrong = OtpTestSupport.wrongCodeFor(code);
+        assertThat(submit(a, wrong), equalTo(SmsOtpConst.ERROR_OTP_INVALID));
+        assertThat(submit(a, wrong), equalTo(SmsOtpConst.ERROR_OTP_INVALID));
+
+        AuthenticationSessionModel b = OtpTestSupport.statefulAuthSession(new HashMap<>());
+        selectChannel(b, OtpChannelChoiceAuthenticator.CHANNEL_SMS);
+        assertThat(sentCodes.size(), equalTo(1));
+        assertThat(submit(b, wrong), equalTo(SmsOtpConst.ERROR_OTP_INVALID));
+        assertThat(submit(b, code), not(equalTo(OtpTestSupport.SUCCESS)));
+    }
+
+    @Test
+    void codeBurnedAfterMaxRetries_cannotBeRecoveredByNewSession() throws Exception {
+        setupStatefulFlow();
+        AuthenticationSessionModel a = OtpTestSupport.statefulAuthSession(new HashMap<>());
+        selectChannel(a, OtpChannelChoiceAuthenticator.CHANNEL_SMS);
+        String code = sentCodes.get(0);
+        String wrong = OtpTestSupport.wrongCodeFor(code);
+        for (int i = 0; i < 3; i++) {
+            submit(a, wrong);
+        }
+
+        Map<String, String> notesB = new HashMap<>();
+        AuthenticationSessionModel b = OtpTestSupport.statefulAuthSession(notesB);
+        selectChannel(b, OtpChannelChoiceAuthenticator.CHANNEL_SMS);
+        assertThat(sentCodes.size(), equalTo(1));
+        assertThat(OtpSendThrottle.getRecentCode(session, realm, user, OtpSendThrottle.CHANNEL_SMS), nullValue());
+        assertThat(notesB.get(OtpChannelChoiceAuthenticator.AUTH_NOTE_CODE_HASH), nullValue());
+        assertThat(submit(b, code), not(equalTo(OtpTestSupport.SUCCESS)));
+    }
+
+    @Test
+    void restartWithinCooldown_unburnedCode_stillSucceeds() throws Exception {
+        setupStatefulFlow();
+        AuthenticationSessionModel a = OtpTestSupport.statefulAuthSession(new HashMap<>());
+        selectChannel(a, OtpChannelChoiceAuthenticator.CHANNEL_SMS);
+        String code = sentCodes.get(0);
+        assertThat(submit(a, OtpTestSupport.wrongCodeFor(code)), equalTo(SmsOtpConst.ERROR_OTP_INVALID));
+
+        AuthenticationSessionModel b = OtpTestSupport.statefulAuthSession(new HashMap<>());
+        selectChannel(b, OtpChannelChoiceAuthenticator.CHANNEL_SMS);
+        assertThat(sentCodes.size(), equalTo(1));
+        assertThat(submit(b, code), equalTo(OtpTestSupport.SUCCESS));
+    }
+
+    @Test
+    void burnedCode_newCodeSentOnlyAfterCooldown() throws Exception {
+        setupStatefulFlow();
+        AuthenticationSessionModel a = OtpTestSupport.statefulAuthSession(new HashMap<>());
+        selectChannel(a, OtpChannelChoiceAuthenticator.CHANNEL_SMS);
+        String wrong = OtpTestSupport.wrongCodeFor(sentCodes.get(0));
+        for (int i = 0; i < 3; i++) {
+            submit(a, wrong);
+        }
+
+        resend(a);
+        assertThat(sentCodes.size(), equalTo(1));
+
+        Time.setOffset(OtpChannelChoiceConst.DEFAULT_SEND_COOLDOWN + 1);
+        resend(a);
+        assertThat(sentCodes.size(), equalTo(2));
+        String newCode = sentCodes.get(1);
+        assertThat(submit(a, OtpTestSupport.wrongCodeFor(newCode)), equalTo(SmsOtpConst.ERROR_OTP_INVALID));
+        assertThat(submit(a, newCode), equalTo(OtpTestSupport.SUCCESS));
     }
 }
