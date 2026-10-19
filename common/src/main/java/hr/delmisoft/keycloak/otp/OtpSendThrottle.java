@@ -107,8 +107,16 @@ public final class OtpSendThrottle {
      * cooldown protecting an OTP that was never delivered.
      */
     public static void release(KeycloakSession session, RealmModel realm, UserModel user, String channel) {
+        release(session, realm, user.getId(), channel);
+    }
+
+    /**
+     * Same as {@link #release(KeycloakSession, RealmModel, UserModel, String)} for callers that
+     * only hold the user id, e.g. a background job running in a different session.
+     */
+    public static void release(KeycloakSession session, RealmModel realm, String userId, String channel) {
         SingleUseObjectProvider store = session.getProvider(SingleUseObjectProvider.class);
-        String key = buildKey(realm, user, channel);
+        String key = buildKey(realm, userId, channel);
         store.remove(key);
         store.remove(key + ":meta");
     }
@@ -164,8 +172,9 @@ public final class OtpSendThrottle {
 
     /**
      * Atomically reserves one verification attempt against a specific delivered code
-     * (identified by its {@code codeHash}), shared by every auth session for this
-     * (realm, user, channel) tuple. Call it <em>before</em> verifying a submission.
+     * (identified by its {@code codeHash}), shared by every auth session and every OTP grant
+     * session for this (realm, user, channel) tuple. Call it <em>before</em> verifying a
+     * submission.
      *
      * <p>Attempts are tracked as numbered slot keys
      * ({@code ...:attempt:{codeHash}:{n}} for {@code n} in {@code 0..maxAttempts-1}) reserved
@@ -229,7 +238,11 @@ public final class OtpSendThrottle {
     }
 
     private static String buildKey(RealmModel realm, UserModel user, String channel) {
-        return KEY_PREFIX + realm.getId() + ":" + user.getId() + ":" + channel;
+        return buildKey(realm, user.getId(), channel);
+    }
+
+    private static String buildKey(RealmModel realm, String userId, String channel) {
+        return KEY_PREFIX + realm.getId() + ":" + userId + ":" + channel;
     }
 
     // ------------------------------------------------------------------------------------

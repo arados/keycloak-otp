@@ -180,7 +180,7 @@ Before issuing an OTP, the plugin checks that the destination channel is trusted
 
 For the custom grant types, the public token endpoint is designed not to be an account-enumeration oracle. An unknown, disabled, unverified, brute-force-locked or required-actions-pending account, and a request with a **wrong `password`**, all get the same `401 + email_otp_required/sms_otp_required + otp_session_id` shape as a valid first-phase response (no OTP is sent; the attempt still consumes the send throttle, and a wrong password still counts towards brute-force detection). The fake session id never resolves: phase 2 fails with the same `401 *OtpSessionExpired` "OTP session has expired" response a genuinely expired session gets. Using an `otp_session_id` with a different username also yields that response (and consumes the session).
 
-Residual: OTP generation and hashing, and (when a password is supplied) a password hash, are performed on every request so CPU cost is comparable, but the latency of actually delivering an OTP (SMTP / SMS gateway) can't be hidden. Over many samples, response timing may still hint whether an OTP was sent; make delivery asynchronous if that matters for your threat model.
+Timing: OTP generation and hashing, and (when a password is supplied) a password hash, are performed on every request so CPU cost is comparable. The OTP is **delivered asynchronously** — the grant answers phase 1 before the email/SMS is sent, on Keycloak's `otp-delivery` executor once the request has committed — so SMTP / SMS gateway latency does not show up in the response time, and the fake path performs the same number of (throwaway, short-lived) cache writes as a real send. What remains is the cost of the account lookup itself and a few cache operations.
 
 ## Setup: Browser Flow
 
@@ -248,6 +248,10 @@ curl -X POST "${KEYCLOAK_URL}/realms/${REALM}/protocol/openid-connect/token" \
 On success, returns the standard token response with `access_token`, `refresh_token`, etc.
 
 > A wrong `password` in phase 1 is **not** reported as `invalid_grant` — phase 1 always looks successful (no OTP is delivered, though), and the attempt surfaces as the generic "OTP session has expired" error in phase 2. Clients should treat that error as "start over".
+
+> **Delivery is asynchronous.** The phase-1 `401` is returned before the code is sent, so it can arrive a moment later. If delivery fails (SMTP / SMS gateway error), the failure is logged server-side, the `otp_session_id` is invalidated and the send throttles are released: phase 2 then fails with `*OtpSessionExpired` and the client may request a new code immediately. Phase 1 never answers `500 otp_send_failed` (that, too, would reveal whether an account exists). Deliveries run on Keycloak's `ExecutorsProvider` pool for the `otp-delivery` task type.
+
+> **Attempt limit.** Each delivered code accepts at most 3 wrong guesses, enforced atomically (concurrent guesses against one `otp_session_id` cannot exceed it). Further requests get `*OtpMaxRetries` and the session is removed. The budget belongs to the code, so guesses made through the browser flow on the same code (recovered within the send cooldown) count too. A redeemed code is single-use everywhere.
 
 ## Passwordless Authentication
 
