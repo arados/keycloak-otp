@@ -7,6 +7,7 @@ import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.Response;
 
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -31,11 +32,15 @@ import org.mockito.quality.Strictness;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.notNullValue;
+import static org.hamcrest.Matchers.nullValue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.clearInvocations;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -386,5 +391,161 @@ class EmailOtpAuthenticatorTest {
     void configuredFor_userWithoutEmail_returnsFalse() {
         when(user.getEmail()).thenReturn(null);
         assertThat(authenticator.configuredFor(session, realm, user), equalTo(false));
+    }
+
+    // --- Retry-limit bypass regression: failures are counted per delivered code ---
+
+    private OtpTestSupport.InMemorySingleUseObjectProvider sharedStore;
+    private MultivaluedMap<String, String> flowParams;
+    private final java.util.List<String> sentCodes = new java.util.ArrayList<>();
+
+    @AfterEach
+    void resetTimeOffset() {
+        Time.setOffset(0);
+    }
+
+    private void setupStatefulFlow() throws Exception {
+        sharedStore = new OtpTestSupport.InMemorySingleUseObjectProvider();
+        flowParams = new MultivaluedHashMap<>();
+        when(context.getSession()).thenReturn(session);
+        when(context.getRealm()).thenReturn(realm);
+        when(context.getUser()).thenReturn(user);
+        when(context.getAuthenticatorConfig()).thenReturn(null);
+        when(context.getHttpRequest()).thenReturn(httpRequest);
+        when(httpRequest.getDecodedFormParameters()).thenReturn(flowParams);
+        when(session.getProvider(EmailTemplateProvider.class)).thenReturn(emailProvider);
+        when(session.getProvider(SingleUseObjectProvider.class)).thenReturn(sharedStore);
+        when(realm.getId()).thenReturn("realm-1");
+        when(user.getId()).thenReturn("user-1");
+        when(emailProvider.setRealm(any())).thenReturn(emailProvider);
+        when(emailProvider.setUser(any())).thenReturn(emailProvider);
+        doAnswer(inv -> {
+            Map<String, Object> attrs = inv.getArgument(2);
+            sentCodes.add((String) attrs.get("code"));
+            return null;
+        }).when(emailProvider).send(anyString(), anyString(), any());
+        when(context.form()).thenReturn(form);
+        when(form.setAttribute(anyString(), any())).thenReturn(form);
+        when(form.setError(anyString())).thenReturn(form);
+        when(form.createForm(anyString())).thenReturn(formResponse);
+    }
+
+    private void startLogin(AuthenticationSessionModel s) {
+        when(context.getAuthenticationSession()).thenReturn(s);
+        clearInvocations(context, form);
+        authenticator.authenticate(context);
+    }
+
+    private String submit(AuthenticationSessionModel s, String otp) {
+        when(context.getAuthenticationSession()).thenReturn(s);
+        flowParams.clear();
+        flowParams.putSingle(EmailOtpConst.PARAM_OTP, otp);
+        clearInvocations(context, form);
+        authenticator.action(context);
+        return OtpTestSupport.outcome(context, form);
+    }
+
+    private void resend(AuthenticationSessionModel s) {
+        when(context.getAuthenticationSession()).thenReturn(s);
+        flowParams.clear();
+        flowParams.putSingle(EmailOtpConst.PARAM_RESEND, "true");
+        clearInvocations(context, form);
+        authenticator.action(context);
+    }
+
+    @Test
+    void resendAfterMaxRetries_doesNotGrantMoreGuesses() throws Exception {
+        setupStatefulFlow();
+        AuthenticationSessionModel a = OtpTestSupport.statefulAuthSession(new HashMap<>());
+        startLogin(a);
+        assertThat(sentCodes.size(), equalTo(1));
+        String code = sentCodes.get(0);
+        String wrong = OtpTestSupport.wrongCodeFor(code);
+
+        for (int i = 0; i < 3; i++) {
+            assertThat(submit(a, wrong), equalTo(EmailOtpConst.ERROR_OTP_INVALID));
+        }
+        assertThat(submit(a, wrong), equalTo(EmailOtpConst.ERROR_OTP_MAX_RETRIES));
+
+        // Resend within the cooldown: no new email, and the burned code must not come back
+        // with a fresh attempt budget.
+        resend(a);
+        assertThat(sentCodes.size(), equalTo(1));
+        assertThat(submit(a, wrong), equalTo(EmailOtpConst.ERROR_OTP_MAX_RETRIES));
+        assertThat(submit(a, code), not(equalTo(OtpTestSupport.SUCCESS)));
+    }
+
+    @Test
+    void newSessionWithinCooldown_sharesFailureCounterForSameCode() throws Exception {
+        setupStatefulFlow();
+        AuthenticationSessionModel a = OtpTestSupport.statefulAuthSession(new HashMap<>());
+        startLogin(a);
+        String code = sentCodes.get(0);
+        String wrong = OtpTestSupport.wrongCodeFor(code);
+        assertThat(submit(a, wrong), equalTo(EmailOtpConst.ERROR_OTP_INVALID));
+        assertThat(submit(a, wrong), equalTo(EmailOtpConst.ERROR_OTP_INVALID));
+
+        // Session B restarts login within the cooldown and recovers the same code — the two
+        // failures from session A must count against it.
+        AuthenticationSessionModel b = OtpTestSupport.statefulAuthSession(new HashMap<>());
+        startLogin(b);
+        assertThat(sentCodes.size(), equalTo(1));
+        assertThat(submit(b, wrong), equalTo(EmailOtpConst.ERROR_OTP_INVALID));
+        assertThat(submit(b, code), not(equalTo(OtpTestSupport.SUCCESS)));
+    }
+
+    @Test
+    void codeBurnedAfterMaxRetries_cannotBeRecoveredByNewSession() throws Exception {
+        setupStatefulFlow();
+        AuthenticationSessionModel a = OtpTestSupport.statefulAuthSession(new HashMap<>());
+        startLogin(a);
+        String code = sentCodes.get(0);
+        String wrong = OtpTestSupport.wrongCodeFor(code);
+        for (int i = 0; i < 3; i++) {
+            submit(a, wrong);
+        }
+
+        Map<String, String> notesB = new HashMap<>();
+        AuthenticationSessionModel b = OtpTestSupport.statefulAuthSession(notesB);
+        startLogin(b);
+        assertThat(sentCodes.size(), equalTo(1));
+        assertThat(OtpSendThrottle.getRecentCode(session, realm, user, OtpSendThrottle.CHANNEL_EMAIL), nullValue());
+        assertThat(notesB.get(EmailOtpConst.AUTH_NOTE_CODE_HASH), nullValue());
+        assertThat(submit(b, code), not(equalTo(OtpTestSupport.SUCCESS)));
+    }
+
+    @Test
+    void restartWithinCooldown_unburnedCode_stillSucceeds() throws Exception {
+        setupStatefulFlow();
+        AuthenticationSessionModel a = OtpTestSupport.statefulAuthSession(new HashMap<>());
+        startLogin(a);
+        String code = sentCodes.get(0);
+        assertThat(submit(a, OtpTestSupport.wrongCodeFor(code)), equalTo(EmailOtpConst.ERROR_OTP_INVALID));
+
+        AuthenticationSessionModel b = OtpTestSupport.statefulAuthSession(new HashMap<>());
+        startLogin(b);
+        assertThat(sentCodes.size(), equalTo(1));
+        assertThat(submit(b, code), equalTo(OtpTestSupport.SUCCESS));
+    }
+
+    @Test
+    void burnedCode_newCodeSentOnlyAfterCooldown() throws Exception {
+        setupStatefulFlow();
+        AuthenticationSessionModel a = OtpTestSupport.statefulAuthSession(new HashMap<>());
+        startLogin(a);
+        String wrong = OtpTestSupport.wrongCodeFor(sentCodes.get(0));
+        for (int i = 0; i < 3; i++) {
+            submit(a, wrong);
+        }
+
+        resend(a);
+        assertThat(sentCodes.size(), equalTo(1));
+
+        Time.setOffset(EmailOtpConst.DEFAULT_SEND_COOLDOWN + 1);
+        resend(a);
+        assertThat(sentCodes.size(), equalTo(2));
+        String newCode = sentCodes.get(1);
+        assertThat(submit(a, OtpTestSupport.wrongCodeFor(newCode)), equalTo(EmailOtpConst.ERROR_OTP_INVALID));
+        assertThat(submit(a, newCode), equalTo(OtpTestSupport.SUCCESS));
     }
 }
