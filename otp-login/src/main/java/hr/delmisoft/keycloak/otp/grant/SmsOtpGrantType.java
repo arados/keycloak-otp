@@ -1,5 +1,7 @@
 package hr.delmisoft.keycloak.otp.grant;
 
+import org.keycloak.models.KeycloakSession;
+import org.keycloak.models.RealmModel;
 import org.keycloak.models.UserModel;
 
 import hr.delmisoft.keycloak.otp.OtpSendThrottle;
@@ -22,7 +24,7 @@ import hr.delmisoft.keycloak.otp.sms.SmsProvider;
 public class SmsOtpGrantType extends AbstractOtpGrantType {
 
     @Override
-    protected void sendOtp(UserModel user, String code) throws Exception {
+    protected void sendOtp(KeycloakSession session, RealmModel realm, UserModel user, String code) throws Exception {
         String phoneAttr = SmsOtpConst.resolvePhoneAttribute(realm);
         String phoneNumber = user.getFirstAttribute(phoneAttr);
         if (phoneNumber == null || phoneNumber.isBlank()) {

@@ -5,6 +5,8 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.Executor;
+import java.util.concurrent.RejectedExecutionException;
 
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
@@ -16,13 +18,20 @@ import org.keycloak.credential.hash.PasswordHashProvider;
 import org.keycloak.events.Details;
 import org.keycloak.events.Errors;
 import org.keycloak.events.EventType;
+import org.keycloak.executors.ExecutorsProvider;
+import org.keycloak.models.AbstractKeycloakTransaction;
 import org.keycloak.models.AuthenticatedClientSessionModel;
 import org.keycloak.models.ClientSessionContext;
+import org.keycloak.models.KeycloakSession;
+import org.keycloak.models.KeycloakSessionFactory;
+import org.keycloak.models.KeycloakTransactionManager;
 import org.keycloak.models.PasswordPolicy;
+import org.keycloak.models.RealmModel;
 import org.keycloak.models.SingleUseObjectProvider;
 import org.keycloak.models.UserCredentialModel;
 import org.keycloak.models.UserModel;
 import org.keycloak.models.UserSessionModel;
+import org.keycloak.models.utils.KeycloakModelUtils;
 import org.keycloak.protocol.oidc.OIDCLoginProtocol;
 import org.keycloak.protocol.oidc.grants.OAuth2GrantTypeBase;
 import org.keycloak.services.CorsErrorResponseException;
@@ -61,14 +70,26 @@ import hr.delmisoft.keycloak.otp.OtpSendThrottle;
  *       caller gets the indistinguishable phase-1 response rather than a 429.</li>
  * </ul>
  *
- * <p><b>Residual timing difference:</b> every phase-1 request generates and hashes an OTP and,
- * when a password is supplied, pays for a password hash (a real verification or a dummy hash
- * with the realm's algorithm), so the CPU-bound work is comparable. What cannot be equalised
- * without delaying every response is the latency of actually delivering the OTP (SMTP / SMS
- * gateway) plus the extra cache writes for the real OTP session; a statistical timing attack
- * against a slow delivery channel can still distinguish "OTP was sent" from "not sent".
- * Deployments that need to close that gap should make delivery asynchronous in their
- * {@code SmsProvider} / mail setup.
+ * <h2>Timing</h2>
+ * Every phase-1 request generates and hashes an OTP and, when a password is supplied, pays for a
+ * password hash (a real verification or a dummy hash with the realm's algorithm), so the
+ * CPU-bound work is comparable. The OTP itself is <b>delivered asynchronously</b>: the request
+ * only stores the OTP session and enlists an after-completion hook; once the request
+ * transaction has committed, the hook hands delivery to Keycloak's {@link ExecutorsProvider}
+ * ({@value #DELIVERY_EXECUTOR} pool), which sends in a fresh {@link KeycloakSession}. SMTP / SMS
+ * gateway latency therefore never shows up in the response time, and a delivery failure is not
+ * reported to the caller (it would be an oracle as well): it is logged, the OTP session is
+ * removed and the per-user, per-identifier and per-IP send slots are released, so the client's
+ * phase 2 fails with "OTP session has expired" and it may request a new code immediately. The
+ * fake path performs the same number of (throwaway, short-lived) cache writes as a real send.
+ * Residual differences are limited to the account lookup itself and a few cache operations.
+ *
+ * <h2>Attempt limit</h2>
+ * Phase-2 guesses are limited per delivered code with {@link OtpSendThrottle#tryConsumeAttempt}
+ * — atomic {@code putIfAbsent} slots reserved before the code is verified, keyed on the code
+ * hash — so concurrent guesses against one {@code otp_session_id} can never evaluate more than
+ * {@value #DEFAULT_MAX_RETRIES} wrong codes, and the budget is shared with the browser-flow
+ * authenticators that may recover the same code from the per-user stash.
  */
 public abstract class AbstractOtpGrantType extends OAuth2GrantTypeBase {
 
@@ -79,7 +100,14 @@ public abstract class AbstractOtpGrantType extends OAuth2GrantTypeBase {
     static final String NOTE_CODE_SALT = "codeSalt";
     static final String NOTE_USER_ID = "userId";
     static final String NOTE_CLIENT_ID = "clientId";
-    static final String NOTE_ATTEMPTS = "attempts";
+    static final String NOTE_CODE_EXPIRES_AT = "codeExpiresAt";
+
+    /** {@link ExecutorsProvider} task type used for asynchronous OTP delivery. */
+    static final String DELIVERY_EXECUTOR = "otp-delivery";
+
+    /** Key prefix of the throwaway entries written on the fake phase-1 path. Never read. */
+    private static final String DECOY_KEY_PREFIX = "otp-decoy:";
+    private static final int DECOY_TTL = 1;
 
     static final int DEFAULT_CODE_LENGTH = 6;
     static final int DEFAULT_TTL = 300;
@@ -89,6 +117,13 @@ public abstract class AbstractOtpGrantType extends OAuth2GrantTypeBase {
 
     /** OTP code material prepared up front on every phase-1 request (see class docs, timing). */
     private record PreparedCode(String code, String salt, String hash, int expiresAt) {}
+
+    /**
+     * Everything the background delivery job needs, captured on the request thread. Holds ids
+     * only — models of the request session must not be used from another thread.
+     */
+    private record PendingDelivery(String realmId, String userId, String identifier, String channel,
+                                   String otpSessionId, String code, OtpSendThrottle.IpSlot ipSlot) {}
 
     @Override
     public Response process(Context context) {
@@ -158,7 +193,7 @@ public abstract class AbstractOtpGrantType extends OAuth2GrantTypeBase {
         String rejection = checkEligibility(user, password);
         if (rejection != null) {
             event.error(rejection);
-            return isPhase2 ? indistinguishablePhase2Response(otpSessionId) : indistinguishablePhase1Response();
+            return isPhase2 ? indistinguishablePhase2Response(otpSessionId) : indistinguishablePhase1Response(prepared);
         }
 
         if (!isPhase2) {
@@ -267,8 +302,27 @@ public abstract class AbstractOtpGrantType extends OAuth2GrantTypeBase {
      * success response — including a syntactically valid {@code otp_session_id} — but no OTP
      * is sent and no session is created, so the id never resolves in phase 2.
      */
-    private Response indistinguishablePhase1Response() {
-        return otpRequiredResponse(UUID.randomUUID().toString());
+    private Response indistinguishablePhase1Response(PreparedCode prepared) {
+        String fakeSessionId = UUID.randomUUID().toString();
+        performDecoyStoreWrites(fakeSessionId, prepared);
+        return otpRequiredResponse(fakeSessionId);
+    }
+
+    /**
+     * Mirrors the cache writes of a real send — per-user cooldown slot, its meta entry and the
+     * OTP session — with entries that expire after {@value #DECOY_TTL}s under a key space that
+     * nothing reads, so the fake path costs comparable store work (see class docs, timing).
+     */
+    private void performDecoyStoreWrites(String fakeSessionId, PreparedCode prepared) {
+        SingleUseObjectProvider store = session.getProvider(SingleUseObjectProvider.class);
+        String key = DECOY_KEY_PREFIX + fakeSessionId;
+        Map<String, String> notes = new HashMap<>();
+        notes.put(NOTE_CODE_HASH, prepared.hash());
+        notes.put(NOTE_CODE_SALT, prepared.salt());
+        notes.put(NOTE_CODE_EXPIRES_AT, String.valueOf(prepared.expiresAt()));
+        store.putIfAbsent(key, DECOY_TTL);
+        store.put(key + ":meta", DECOY_TTL, notes);
+        store.put(key + ":session", DECOY_TTL, notes);
     }
 
     /**
@@ -336,8 +390,8 @@ public abstract class AbstractOtpGrantType extends OAuth2GrantTypeBase {
     }
 
     /**
-     * Phase 1: Send the prepared OTP, return 401 with session ID. The per-identifier throttle
-     * has already been reserved by {@link #process}.
+     * Phase 1: store the OTP session, schedule delivery of the prepared OTP and return 401 with
+     * the session ID. The per-identifier throttle has already been reserved by {@link #process}.
      */
     private Response handlePhase1(UserModel user, String username, PreparedCode prepared, int cooldown,
                                   OtpSendThrottle.IpSlot ipSlot) {
@@ -348,7 +402,7 @@ public abstract class AbstractOtpGrantType extends OAuth2GrantTypeBase {
             // that identifier to this account, so answer like any other identifier — without
             // sending a second OTP. The previously delivered code remains valid.
             event.error(Errors.NOT_ALLOWED);
-            return indistinguishablePhase1Response();
+            return indistinguishablePhase1Response(prepared);
         }
 
         String sessionId = UUID.randomUUID().toString();
@@ -356,29 +410,119 @@ public abstract class AbstractOtpGrantType extends OAuth2GrantTypeBase {
         Map<String, String> notes = new HashMap<>();
         notes.put(NOTE_CODE_HASH, prepared.hash());
         notes.put(NOTE_CODE_SALT, prepared.salt());
+        notes.put(NOTE_CODE_EXPIRES_AT, String.valueOf(prepared.expiresAt()));
         notes.put(NOTE_USER_ID, user.getId());
         notes.put(NOTE_CLIENT_ID, client.getClientId());
-        notes.put(NOTE_ATTEMPTS, "0");
 
         SingleUseObjectProvider store = session.getProvider(SingleUseObjectProvider.class);
         store.put(sessionId, DEFAULT_TTL, notes);
 
-        try {
-            sendOtp(user, prepared.code());
-        } catch (Exception e) {
-            LOG.error("Failed to send OTP", e);
-            // Roll back so a transient delivery error doesn't lock the user out of retries
-            // by leaving a cooldown protecting an OTP that was never received.
-            store.remove(sessionId);
-            OtpSendThrottle.release(session, realm, user, getChannel());
-            OtpSendThrottle.releaseIdentifier(session, realm, username, getChannel());
-            OtpSendThrottle.releaseIpSlot(session, ipSlot);
-            event.error(Errors.EMAIL_SEND_FAILED);
-            throw new CorsErrorResponseException(cors, "otp_send_failed",
-                    "Failed to send OTP", Response.Status.INTERNAL_SERVER_ERROR);
-        }
+        scheduleDelivery(new PendingDelivery(realm.getId(), user.getId(), username, getChannel(),
+                sessionId, prepared.code(), ipSlot));
 
         return otpRequiredResponse(sessionId);
+    }
+
+    /**
+     * Delivers the OTP off the request thread, after the request transaction completed (so the
+     * OTP session entry is in place before the code can arrive). Only cheap work happens on the
+     * request thread: capturing the factory/executor and enlisting the hook.
+     */
+    private void scheduleDelivery(PendingDelivery delivery) {
+        KeycloakSessionFactory factory = session.getKeycloakSessionFactory();
+        ExecutorsProvider executors = session.getProvider(ExecutorsProvider.class);
+        Executor executor = executors != null ? executors.getExecutor(DELIVERY_EXECUTOR) : null;
+        if (executor == null) {
+            LOG.warnf("No '%s' executor available; delivering OTPs synchronously after the request", DELIVERY_EXECUTOR);
+        }
+
+        AbstractKeycloakTransaction afterCompletion = new AbstractKeycloakTransaction() {
+            @Override
+            protected void commitImpl() {
+                dispatch(executor, () -> deliver(factory, delivery));
+            }
+
+            @Override
+            protected void rollbackImpl() {
+                // The request failed after phase 1 stored its state: nothing must be sent, and
+                // the reservations taken for this send are handed back.
+                dispatch(executor, () -> rollBackDelivery(factory, delivery));
+            }
+        };
+
+        KeycloakTransactionManager tx = session.getTransactionManager();
+        if (tx != null && tx.isActive()) {
+            tx.enlistAfterCompletion(afterCompletion);
+        } else {
+            afterCompletion.begin();
+            afterCompletion.commit();
+        }
+    }
+
+    private static void dispatch(Executor executor, Runnable job) {
+        if (executor == null) {
+            job.run();
+            return;
+        }
+        try {
+            executor.execute(job);
+        } catch (RejectedExecutionException e) {
+            LOG.warn("OTP delivery executor rejected the job; running it on the calling thread", e);
+            job.run();
+        }
+    }
+
+    /**
+     * Background job: re-resolves realm and user by id in a fresh session and sends the code.
+     * On failure the send is rolled back (see {@link #rollBackDelivery}).
+     */
+    private void deliver(KeycloakSessionFactory factory, PendingDelivery delivery) {
+        try {
+            KeycloakModelUtils.runJobInTransaction(factory, s -> {
+                RealmModel jobRealm = s.realms().getRealm(delivery.realmId());
+                if (jobRealm == null) {
+                    throw new IllegalStateException("Realm no longer exists");
+                }
+                s.getContext().setRealm(jobRealm);
+                UserModel jobUser = s.users().getUserById(jobRealm, delivery.userId());
+                if (jobUser == null) {
+                    throw new IllegalStateException("User no longer exists");
+                }
+                try {
+                    sendOtp(s, jobRealm, jobUser, delivery.code());
+                } catch (RuntimeException e) {
+                    throw e;
+                } catch (Exception e) {
+                    throw new IllegalStateException(e.getMessage(), e);
+                }
+            });
+        } catch (RuntimeException e) {
+            LOG.errorf(e, "Failed to deliver %s OTP (realm=%s, user=%s); invalidating the OTP session",
+                    delivery.channel(), delivery.realmId(), delivery.userId());
+            rollBackDelivery(factory, delivery);
+        }
+    }
+
+    /**
+     * Undo a send that will never reach the user: remove the OTP session and release the
+     * per-user cooldown (and its recoverable-code stash), the per-identifier slot and the IP
+     * slot, so a transient delivery error doesn't lock the user out of retries.
+     */
+    private static void rollBackDelivery(KeycloakSessionFactory factory, PendingDelivery delivery) {
+        try {
+            KeycloakModelUtils.runJobInTransaction(factory, s -> {
+                s.getProvider(SingleUseObjectProvider.class).remove(delivery.otpSessionId());
+                RealmModel jobRealm = s.realms().getRealm(delivery.realmId());
+                if (jobRealm != null) {
+                    OtpSendThrottle.release(s, jobRealm, delivery.userId(), delivery.channel());
+                    OtpSendThrottle.releaseIdentifier(s, jobRealm, delivery.identifier(), delivery.channel());
+                }
+                OtpSendThrottle.releaseIpSlot(s, delivery.ipSlot());
+            });
+        } catch (RuntimeException e) {
+            LOG.errorf(e, "Failed to roll back undelivered %s OTP (realm=%s, user=%s)",
+                    delivery.channel(), delivery.realmId(), delivery.userId());
+        }
     }
 
     /**
@@ -431,44 +575,56 @@ public abstract class AbstractOtpGrantType extends OAuth2GrantTypeBase {
                     "Invalid OTP session", Response.Status.UNAUTHORIZED);
         }
 
-        // Check max retries (treat malformed counter as session-corrupt and fail closed).
-        int attempts;
+        // Validate session integrity (fail closed on anything missing or malformed).
+        String storedHash = notes.get(NOTE_CODE_HASH);
+        String storedSalt = notes.get(NOTE_CODE_SALT);
+        int codeExpiresAt;
         try {
-            attempts = Integer.parseInt(notes.get(NOTE_ATTEMPTS));
+            codeExpiresAt = Integer.parseInt(notes.get(NOTE_CODE_EXPIRES_AT));
         } catch (NumberFormatException e) {
+            codeExpiresAt = -1;
+        }
+        if (storedHash == null || storedSalt == null || codeExpiresAt <= 0) {
             store.remove(otpSessionId);
             event.error(Errors.INVALID_USER_CREDENTIALS);
             throw new CorsErrorResponseException(cors, getSessionExpiredError(),
                     "OTP session is corrupt", Response.Status.UNAUTHORIZED);
         }
-        if (attempts >= DEFAULT_MAX_RETRIES) {
+
+        // Reserve an attempt BEFORE verifying. Slots are atomic putIfAbsent keys per delivered
+        // code (shared with the browser flow), so no number of concurrent requests can evaluate
+        // more than DEFAULT_MAX_RETRIES guesses — unlike a get/compare/replace counter.
+        int attemptNo = OtpSendThrottle.tryConsumeAttempt(session, realm, user, getChannel(),
+                storedHash, DEFAULT_MAX_RETRIES, codeExpiresAt);
+        if (attemptNo == 0) {
             store.remove(otpSessionId);
+            OtpSendThrottle.burnCode(session, realm, user, getChannel(), storedHash);
             event.error(Errors.INVALID_USER_CREDENTIALS);
             throw new CorsErrorResponseException(cors, getMaxRetriesError(),
                     "Too many failed attempts", Response.Status.UNAUTHORIZED);
         }
 
-        // Validate code (hashed)
-        String storedHash = notes.get(NOTE_CODE_HASH);
-        String storedSalt = notes.get(NOTE_CODE_SALT);
-        if (storedHash == null || storedSalt == null) {
-            store.remove(otpSessionId);
-            event.error(Errors.INVALID_USER_CREDENTIALS);
-            throw new CorsErrorResponseException(cors, getSessionExpiredError(),
-                    "OTP session is corrupt", Response.Status.UNAUTHORIZED);
-        }
-
         if (!OtpHash.verify(otp, storedHash, storedSalt)) {
-            notes.put(NOTE_ATTEMPTS, String.valueOf(attempts + 1));
-            store.replace(otpSessionId, notes);
+            if (attemptNo >= DEFAULT_MAX_RETRIES) {
+                // Last attempt for this code was wrong: make it unrecoverable by the browser flow
+                // too. The OTP session itself is removed by the next request, which then gets the
+                // max-retries error.
+                OtpSendThrottle.burnCode(session, realm, user, getChannel(), storedHash);
+            }
             recordBruteForceFailure(user);
             event.error(Errors.INVALID_USER_CREDENTIALS);
             throw new CorsErrorResponseException(cors, getOtpInvalidError(),
                     "Invalid OTP code", Response.Status.UNAUTHORIZED);
         }
 
-        // OTP valid — consume session and generate tokens
-        store.remove(otpSessionId);
+        // OTP valid — consume the session atomically. remove() returns null when a concurrent
+        // request already redeemed (or burned) it, so at most one request issues tokens.
+        if (store.remove(otpSessionId) == null) {
+            event.error(Errors.INVALID_USER_CREDENTIALS);
+            return indistinguishablePhase2Response(otpSessionId);
+        }
+        // Single use: the redeemed code can no longer be recovered into a browser session.
+        OtpSendThrottle.burnCode(session, realm, user, getChannel(), storedHash);
         return generateTokenResponse(user, scope);
     }
 
@@ -532,8 +688,15 @@ public abstract class AbstractOtpGrantType extends OAuth2GrantTypeBase {
 
     // Template methods for subclasses
 
-    /** Send the OTP code to the user (email or SMS). */
-    protected abstract void sendOtp(UserModel user, String code) throws Exception;
+    /**
+     * Send the OTP code to the user (email or SMS).
+     *
+     * <p>Called from a background thread, inside a fresh transaction: implementations must use
+     * only the {@code session}, {@code realm} and {@code user} passed in — never the grant's own
+     * request-scoped fields ({@code this.session}, {@code this.realm}, ...).
+     */
+    protected abstract void sendOtp(KeycloakSession session, RealmModel realm, UserModel user, String code)
+            throws Exception;
 
     /** Error code returned in phase 1 response (e.g. "email_otp_required"). */
     protected abstract String getOtpRequiredError();

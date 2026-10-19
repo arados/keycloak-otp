@@ -85,6 +85,7 @@ class OtpGrantEnumerationParityTest {
     @Mock KeycloakContext keycloakContext;
 
     private InMemorySingleUseStore store;
+    private OtpGrantTestSupport.AsyncDeliveryHarness async;
 
     @BeforeEach
     void setUp() {
@@ -118,6 +119,8 @@ class OtpGrantEnumerationParityTest {
         when(credentialManager.isValid(any(UserCredentialModel.class))).thenReturn(true);
 
         when(otherUser.getId()).thenReturn("user-2");
+        when(userProvider.getUserById(eq(realm), eq("user-1"))).thenReturn(user);
+        async = OtpGrantTestSupport.AsyncDeliveryHarness.install(session, session, realm, "realm-1");
 
         // Keycloak's username/email lookups are case-insensitive.
         when(userProvider.getUserByUsername(eq(realm), argThat(s -> REAL.equalsIgnoreCase(s)))).thenReturn(user);
@@ -358,7 +361,7 @@ class OtpGrantEnumerationParityTest {
         Map<String, String> notes = new HashMap<>();
         notes.put("userId", userId);
         notes.put("clientId", "test-client");
-        notes.put("attempts", "0");
+        notes.put("codeExpiresAt", String.valueOf(org.keycloak.common.util.Time.currentTime() + 300));
         String salt = hr.delmisoft.keycloak.otp.OtpHash.newSalt();
         notes.put("codeSalt", salt);
         notes.put("codeHash", hr.delmisoft.keycloak.otp.OtpHash.hash("654321", salt));
@@ -397,6 +400,10 @@ class OtpGrantEnumerationParityTest {
             return Observed.of(response);
         } catch (CorsErrorResponseException e) {
             return Observed.of(e);
+        } finally {
+            // End of the HTTP request: after-completion hooks run and the asynchronous OTP
+            // delivery (if any) is let through, so tests can inspect what was sent.
+            async.completeRequest();
         }
     }
 

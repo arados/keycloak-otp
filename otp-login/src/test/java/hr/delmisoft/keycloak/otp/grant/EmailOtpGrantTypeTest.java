@@ -94,9 +94,9 @@ class EmailOtpGrantTypeTest {
 
     @Test
     void sendOtp_invokesEmailTemplateProviderWithCode() throws Exception {
-        Method sendOtp = AbstractOtpGrantType.class.getDeclaredMethod("sendOtp", UserModel.class, String.class);
+        Method sendOtp = AbstractOtpGrantType.class.getDeclaredMethod("sendOtp", KeycloakSession.class, RealmModel.class, UserModel.class, String.class);
         sendOtp.setAccessible(true);
-        sendOtp.invoke(grant, user, "987654");
+        sendOtp.invoke(grant, session, realm, user, "987654");
 
         // The map passed to send() must carry the raw code under the "code" key so the
         // template can render it; if this assertion ever changes, the email template
