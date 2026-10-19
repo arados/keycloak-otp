@@ -154,10 +154,19 @@ public class SmsOtpAuthenticator implements Authenticator {
         String hash = OtpHash.hash(code, salt);
         int codeExpiresAt = Time.currentTime() + ttl;
 
+        // Per-source-IP cap is checked first so a blocked IP never consumes the user's cooldown.
+        OtpSendThrottle.IpSlot ipSlot = OtpSendThrottle.tryReserveIpSlot(context.getSession(),
+                context.getRealm(), context.getConnection());
+        if (!ipSlot.isAllowed()) {
+            challengeIpLimited(context, ipSlot);
+            return;
+        }
+
         boolean reserved = OtpSendThrottle.tryReserveWithCodeHash(context.getSession(), context.getRealm(),
                 context.getUser(), OtpSendThrottle.CHANNEL_SMS, cooldown, hash, salt, codeExpiresAt);
 
         if (!reserved) {
+            OtpSendThrottle.releaseIpSlot(context.getSession(), ipSlot);
             AuthenticationSessionModel authSession = context.getAuthenticationSession();
             OtpSendThrottle.RecentCode recent = OtpSendThrottle.getRecentCode(context.getSession(),
                     context.getRealm(), context.getUser(), OtpSendThrottle.CHANNEL_SMS);
@@ -183,6 +192,7 @@ public class SmsOtpAuthenticator implements Authenticator {
         authSession.setAuthNote(SmsOtpConst.AUTH_NOTE_LAST_SENT, String.valueOf(Time.currentTime()));
 
         if (!sendSms(context, code)) {
+            OtpSendThrottle.releaseIpSlot(context.getSession(), ipSlot);
             OtpSendThrottle.release(context.getSession(), context.getRealm(), context.getUser(),
                     OtpSendThrottle.CHANNEL_SMS);
             authSession.removeAuthNote(SmsOtpConst.AUTH_NOTE_CODE_HASH);
@@ -204,8 +214,17 @@ public class SmsOtpAuthenticator implements Authenticator {
         String salt = OtpHash.newSalt();
         String hash = OtpHash.hash(newCode, salt);
         int codeExpiresAt = Time.currentTime() + ttl;
+        OtpSendThrottle.IpSlot ipSlot = OtpSendThrottle.tryReserveIpSlot(context.getSession(),
+                context.getRealm(), context.getConnection());
+        if (!ipSlot.isAllowed()) {
+            challengeIpLimited(context, ipSlot);
+            return;
+        }
         boolean reserved = OtpSendThrottle.tryReserveWithCodeHash(context.getSession(), context.getRealm(),
                 context.getUser(), OtpSendThrottle.CHANNEL_SMS, cooldown, hash, salt, codeExpiresAt);
+        if (!reserved) {
+            OtpSendThrottle.releaseIpSlot(context.getSession(), ipSlot);
+        }
         if (reserved) {
             AuthenticationSessionModel authSession = context.getAuthenticationSession();
             authSession.setAuthNote(SmsOtpConst.AUTH_NOTE_CODE_HASH, hash);
@@ -214,6 +233,7 @@ public class SmsOtpAuthenticator implements Authenticator {
             authSession.setAuthNote(SmsOtpConst.AUTH_NOTE_ATTEMPTS, "0");
             authSession.setAuthNote(SmsOtpConst.AUTH_NOTE_LAST_SENT, String.valueOf(Time.currentTime()));
             if (!sendSms(context, newCode)) {
+                OtpSendThrottle.releaseIpSlot(context.getSession(), ipSlot);
                 OtpSendThrottle.release(context.getSession(), context.getRealm(), context.getUser(),
                         OtpSendThrottle.CHANNEL_SMS);
                 authSession.removeAuthNote(SmsOtpConst.AUTH_NOTE_CODE_HASH);
@@ -229,6 +249,15 @@ public class SmsOtpAuthenticator implements Authenticator {
                         .setAttribute("resendAvailableInSeconds", resendAvailableInSeconds(context))
                         .setError(SmsOtpConst.ERROR_OTP_EXPIRED)
                         .createForm(SmsOtpConst.LOGIN_TEMPLATE));
+    }
+
+    /** OTP form without sending: the per-source-IP send limit is exhausted. */
+    private void challengeIpLimited(AuthenticationFlowContext context, OtpSendThrottle.IpSlot ipSlot) {
+        context.challenge(context.form()
+                .setAttribute("resendAvailableInSeconds",
+                        Math.max(resendAvailableInSeconds(context), ipSlot.retryAfterSeconds()))
+                .setError(OtpSendThrottle.ERROR_IP_SEND_LIMITED)
+                .createForm(SmsOtpConst.LOGIN_TEMPLATE));
     }
 
     private void challengeOtpForm(AuthenticationFlowContext context) {

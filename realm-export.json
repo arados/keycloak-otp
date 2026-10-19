@@ -6,7 +6,9 @@
   "loginTheme": "otp",
   "emailTheme": "otp",
   "attributes": {
-    "otp.sendCooldown": "5"
+    "otp.sendCooldown": "5",
+    "otp.ipSendLimit": "1000",
+    "otp.ipSendWindow": "60"
   },
   "smtpServer": {
     "host": "mailpit",

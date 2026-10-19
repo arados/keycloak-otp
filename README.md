@@ -119,10 +119,10 @@ The phone-number user attribute is configured at the **realm** level, not per ex
 
 ### Send Rate Limiting
 
-Both the browser-flow authenticators and the grant types throttle OTP sends per `(realm, user, channel)`, backed by Keycloak's `SingleUseObjectProvider` (cluster-safe).
+Both the browser-flow authenticators and the grant types throttle OTP sends per `(realm, user, channel)`, backed by Keycloak's `SingleUseObjectProvider` (cluster-safe). The grant types additionally throttle per `(realm, submitted username/email, channel)` so the throttle cannot be used to enumerate accounts (see below).
 
 - **Browser flow:** the initial send when a user starts a fresh login always goes through. The **Resend code** button on the OTP form is disabled until `sendCooldown` elapses, then re-enables (a JS countdown drives the UI). Refreshing the OTP page does **not** trigger a new send — the existing valid code in the auth session is re-shown.
-- **Grant types** (`urn:otp:email` / `urn:otp:sms`): every phase-1 send is throttled. A request within the cooldown window returns:
+- **Grant types** (`urn:otp:email` / `urn:otp:sms`): every phase-1 request is throttled on the identifier the client submitted (trimmed, case-insensitive), **whether or not it matches an account** — unknown usernames get the same 429 as real ones. A second request for the same identifier within the cooldown window returns:
 
   ```
   HTTP/1.1 429 Too Many Requests
@@ -130,6 +130,8 @@ Both the browser-flow authenticators and the grant types throttle OTP sends per 
 
   {"error":"otp_send_throttled","error_description":"Too many OTP send requests. Retry in 38 seconds.","retry_after":38}
   ```
+
+  The per-account cooldown still caps real deliveries: if the account was already sent an OTP via a *different* identifier (e.g. its email after its username) or the browser flow, the grant answers with the normal phase-1 `401` response but sends nothing (the earlier code stays valid) — a 429 there would reveal that the two identifiers belong to the same account.
 
   Configure via the realm attribute `otp.sendCooldown` (seconds, default `60`). Set in `realm-export.json`:
 
@@ -140,6 +142,30 @@ Both the browser-flow authenticators and the grant types throttle OTP sends per 
     }
   }
   ```
+
+#### Per-source-IP send limit
+
+The per-user cooldown alone does not stop one client from triggering sends for many different accounts (SMS pumping / toll fraud) or from re-sending to one victim once per cooldown forever. On top of it, every send path (browser authenticators and grant types, both channels) is capped per `(realm, client IP)`:
+
+| Realm attribute | Default | Effect |
+|---|---|---|
+| `otp.ipSendLimit` | `10` | Max OTP sends one source IP may trigger per window, across all users and both channels. `0` disables the IP limit. |
+| `otp.ipSendWindow` | `3600` | Window length in seconds. Each send holds one of the `otp.ipSendLimit` slots for this long. |
+
+- The IP limit is checked **before** the per-user cooldown, so a blocked IP never consumes the target user's cooldown. If nothing is sent (the per-user cooldown blocked it, or delivery failed), the IP slot is released again.
+- **Grant types:** a blocked request gets the same `429` / `Retry-After` / `{"error":"otp_send_throttled", "retry_after":N}` response as the per-user cooldown. Phase-1 requests for unknown, disabled or unverified usernames also use up a slot, so the 429 does not reveal whether an account exists.
+- **Browser flow:** the OTP form is shown without sending, with the message `otpSendIpLimited` ("Too many verification codes have been requested from your network…"), and the resend button stays disabled until a slot frees up.
+- The client IP is Keycloak's `ClientConnection.getRemoteAddr()`. **Behind a reverse proxy or load balancer, configure Keycloak's [proxy settings](https://www.keycloak.org/server/reverseproxy) (`proxy-headers`, trusted proxies).** Otherwise every request appears to come from the proxy and all users share one bucket. IPv6 clients are grouped by `/64` prefix.
+- Backed by `SingleUseObjectProvider` (cluster-safe): each send reserves one of N numbered keys `otp-ip:{realm}:{ip}:{slot}` with `putIfAbsent` and the window as TTL. A reservation costs at most `otp.ipSendLimit` store operations, so keep the limit modest. Users behind a shared NAT (offices, carrier-grade NAT) share one bucket; raise the limit if that matters for you.
+
+```json
+{
+  "attributes": {
+    "otp.ipSendLimit": "10",
+    "otp.ipSendWindow": "3600"
+  }
+}
+```
 
 ### Channel verification (security)
 
@@ -152,7 +178,9 @@ Before issuing an OTP, the plugin checks that the destination channel is trusted
 | `smsOtp.verifiedPhoneAttribute` | `phoneNumberVerified` | User attribute name that gates SMS when `requireVerifiedPhone` is enabled. |
 | `smsOtp.phoneAttribute` | `phoneNumber` | User attribute holding the phone number. Used by both the browser flow's `configuredFor` check and the SMS grant type. |
 
-For the custom grant types, an unknown/disabled/unverified account returns the same `401 + email_otp_required/sms_otp_required + otp_session_id` shape as a valid first-phase response, so the public token endpoint is not an account-enumeration oracle. The fake session id never resolves in phase 2.
+For the custom grant types, the public token endpoint is designed not to be an account-enumeration oracle. An unknown, disabled, unverified, brute-force-locked or required-actions-pending account, and a request with a **wrong `password`**, all get the same `401 + email_otp_required/sms_otp_required + otp_session_id` shape as a valid first-phase response (no OTP is sent; the attempt still consumes the send throttle, and a wrong password still counts towards brute-force detection). The fake session id never resolves: phase 2 fails with the same `401 *OtpSessionExpired` "OTP session has expired" response a genuinely expired session gets. Using an `otp_session_id` with a different username also yields that response (and consumes the session).
+
+Timing: OTP generation and hashing, and (when a password is supplied) a password hash, are performed on every request so CPU cost is comparable. The OTP is **delivered asynchronously** — the grant answers phase 1 before the email/SMS is sent, on Keycloak's `otp-delivery` executor once the request has committed — so SMTP / SMS gateway latency does not show up in the response time, and the fake path performs the same number of (throwaway, short-lived) cache writes as a real send. What remains is the cost of the account lookup itself and a few cache operations.
 
 ## Setup: Browser Flow
 
@@ -218,6 +246,12 @@ curl -X POST "${KEYCLOAK_URL}/realms/${REALM}/protocol/openid-connect/token" \
 ```
 
 On success, returns the standard token response with `access_token`, `refresh_token`, etc.
+
+> A wrong `password` in phase 1 is **not** reported as `invalid_grant` — phase 1 always looks successful (no OTP is delivered, though), and the attempt surfaces as the generic "OTP session has expired" error in phase 2. Clients should treat that error as "start over".
+
+> **Delivery is asynchronous.** The phase-1 `401` is returned before the code is sent, so it can arrive a moment later. If delivery fails (SMTP / SMS gateway error), the failure is logged server-side, the `otp_session_id` is invalidated and the send throttles are released: phase 2 then fails with `*OtpSessionExpired` and the client may request a new code immediately. Phase 1 never answers `500 otp_send_failed` (that, too, would reveal whether an account exists). Deliveries run on Keycloak's `ExecutorsProvider` pool for the `otp-delivery` task type.
+
+> **Attempt limit.** Each delivered code accepts at most 3 wrong guesses, enforced atomically (concurrent guesses against one `otp_session_id` cannot exceed it). Further requests get `*OtpMaxRetries` and the session is removed. The budget belongs to the code, so guesses made through the browser flow on the same code (recovered within the send cooldown) count too. A redeemed code is single-use everywhere.
 
 ## Passwordless Authentication
 

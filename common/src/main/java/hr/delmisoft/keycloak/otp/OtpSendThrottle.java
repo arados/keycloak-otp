@@ -1,10 +1,17 @@
 package hr.delmisoft.keycloak.otp;
 
+import java.net.Inet6Address;
+import java.net.InetAddress;
+import java.net.UnknownHostException;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.HashMap;
+import java.util.Locale;
 import java.util.Map;
+import java.util.regex.Pattern;
 
+import org.jboss.logging.Logger;
+import org.keycloak.common.ClientConnection;
 import org.keycloak.common.util.Time;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
@@ -100,8 +107,16 @@ public final class OtpSendThrottle {
      * cooldown protecting an OTP that was never delivered.
      */
     public static void release(KeycloakSession session, RealmModel realm, UserModel user, String channel) {
+        release(session, realm, user.getId(), channel);
+    }
+
+    /**
+     * Same as {@link #release(KeycloakSession, RealmModel, UserModel, String)} for callers that
+     * only hold the user id, e.g. a background job running in a different session.
+     */
+    public static void release(KeycloakSession session, RealmModel realm, String userId, String channel) {
         SingleUseObjectProvider store = session.getProvider(SingleUseObjectProvider.class);
-        String key = buildKey(realm, user, channel);
+        String key = buildKey(realm, userId, channel);
         store.remove(key);
         store.remove(key + ":meta");
     }
@@ -157,8 +172,9 @@ public final class OtpSendThrottle {
 
     /**
      * Atomically reserves one verification attempt against a specific delivered code
-     * (identified by its {@code codeHash}), shared by every auth session for this
-     * (realm, user, channel) tuple. Call it <em>before</em> verifying a submission.
+     * (identified by its {@code codeHash}), shared by every auth session and every OTP grant
+     * session for this (realm, user, channel) tuple. Call it <em>before</em> verifying a
+     * submission.
      *
      * <p>Attempts are tracked as numbered slot keys
      * ({@code ...:attempt:{codeHash}:{n}} for {@code n} in {@code 0..maxAttempts-1}) reserved
@@ -222,6 +238,285 @@ public final class OtpSendThrottle {
     }
 
     private static String buildKey(RealmModel realm, UserModel user, String channel) {
-        return KEY_PREFIX + realm.getId() + ":" + user.getId() + ":" + channel;
+        return buildKey(realm, user.getId(), channel);
+    }
+
+    private static String buildKey(RealmModel realm, String userId, String channel) {
+        return KEY_PREFIX + realm.getId() + ":" + userId + ":" + channel;
+    }
+
+    // ------------------------------------------------------------------------------------
+    // Per-(realm, client IP) send limit
+    //
+    // The per-user cooldown above stops one account from being spammed faster than once per
+    // cooldown, but on its own it lets a single client trigger sends for an unbounded number
+    // of accounts (SMS pumping / toll fraud) and keep one victim's phone buzzing forever.
+    // This limiter caps the number of sends one source IP may trigger per window, across all
+    // users and both channels.
+    //
+    // Implementation: N numbered slot keys "otp-ip:{realm}:{ip}:{0..N-1}", each reserved with
+    // SingleUseObjectProvider.putIfAbsent and the window as TTL. A send needs a free slot; a
+    // slot frees itself when its TTL expires (sliding window per slot). putIfAbsent is atomic
+    // and cluster-safe, so there is no read-modify-write race on a shared counter.
+    // ------------------------------------------------------------------------------------
+
+    /** Realm attribute: max sends per source IP per window. {@code 0} disables the limit. */
+    public static final String CONFIG_IP_SEND_LIMIT = "otp.ipSendLimit";
+    /** Realm attribute: IP-limit window in seconds. */
+    public static final String CONFIG_IP_SEND_WINDOW = "otp.ipSendWindow";
+    public static final int DEFAULT_IP_SEND_LIMIT = 10;
+    public static final int DEFAULT_IP_SEND_WINDOW = 3600;
+
+    /** Login-theme message key shown when the browser flow is blocked by the IP limit. */
+    public static final String ERROR_IP_SEND_LIMITED = "otpSendIpLimited";
+
+    private static final Logger LOG = Logger.getLogger(OtpSendThrottle.class);
+    private static final String IP_KEY_PREFIX = "otp-ip:";
+    private static final Pattern IPV6_LITERAL = Pattern.compile("[0-9A-Fa-f:.]+");
+
+    /**
+     * Outcome of {@link #tryReserveIpSlot}. {@link #isAllowed()} tells the caller whether it may
+     * send. An allowed slot that was actually recorded can be handed back with
+     * {@link #releaseIpSlot} when nothing ends up being sent.
+     */
+    public static final class IpSlot {
+        private static final IpSlot UNTRACKED = new IpSlot(true, null, 0);
+
+        private final boolean allowed;
+        private final String key;
+        private final int retryAfterSeconds;
+
+        private IpSlot(boolean allowed, String key, int retryAfterSeconds) {
+            this.allowed = allowed;
+            this.key = key;
+            this.retryAfterSeconds = retryAfterSeconds;
+        }
+
+        public boolean isAllowed() {
+            return allowed;
+        }
+
+        /** Seconds until a slot frees up; only meaningful when {@link #isAllowed()} is false. */
+        public int retryAfterSeconds() {
+            return retryAfterSeconds;
+        }
+    }
+
+    /**
+     * Reserve one send for the request's source IP using the realm's {@code otp.ipSendLimit} /
+     * {@code otp.ipSendWindow} attributes. The IP comes from
+     * {@link ClientConnection#getRemoteAddr()}, which honors forwarding headers only when
+     * Keycloak's proxy configuration says to.
+     */
+    public static IpSlot tryReserveIpSlot(KeycloakSession session, RealmModel realm, ClientConnection connection) {
+        String ip = connection == null ? null : connection.getRemoteAddr();
+        return tryReserveIpSlot(session, realm, ip, resolveIpSendLimit(realm), resolveIpSendWindow(realm));
+    }
+
+    /**
+     * Reserve one of {@code limit} send slots for {@code clientIp} in this realm for
+     * {@code windowSec} seconds. A {@code limit <= 0} or a missing IP is not tracked and always
+     * allowed.
+     */
+    public static IpSlot tryReserveIpSlot(KeycloakSession session, RealmModel realm, String clientIp,
+                                          int limit, int windowSec) {
+        String ip = normalizeIp(clientIp);
+        if (limit <= 0 || windowSec <= 0 || ip == null) {
+            return IpSlot.UNTRACKED;
+        }
+        SingleUseObjectProvider store = session.getProvider(SingleUseObjectProvider.class);
+        String prefix = IP_KEY_PREFIX + realm.getId() + ":" + ip + ":";
+        for (int slot = 0; slot < limit; slot++) {
+            String key = prefix + slot;
+            if (store.putIfAbsent(key, windowSec)) {
+                Map<String, String> meta = new HashMap<>();
+                meta.put(NOTE_EXPIRES_AT, String.valueOf(Time.currentTime() + windowSec));
+                store.put(key + ":meta", windowSec, meta);
+                return new IpSlot(true, key, 0);
+            }
+        }
+        LOG.debugf("OTP send blocked by per-IP limit: realm=%s ip=%s limit=%d window=%ds",
+                realm.getId(), ip, limit, windowSec);
+        return new IpSlot(false, null, ipRetryAfter(store, prefix, limit, windowSec));
+    }
+
+    /**
+     * Hand back a slot obtained from {@link #tryReserveIpSlot} when nothing was sent (per-user
+     * cooldown blocked, or delivery failed). No-op for blocked/untracked slots or {@code null}.
+     */
+    public static void releaseIpSlot(KeycloakSession session, IpSlot slot) {
+        if (slot == null || slot.key == null) {
+            return;
+        }
+        SingleUseObjectProvider store = session.getProvider(SingleUseObjectProvider.class);
+        store.remove(slot.key);
+        store.remove(slot.key + ":meta");
+    }
+
+    /** {@code otp.ipSendLimit}; {@code 0} disables, negative/invalid falls back to the default. */
+    public static int resolveIpSendLimit(RealmModel realm) {
+        int value = parseIntAttribute(realm, CONFIG_IP_SEND_LIMIT, DEFAULT_IP_SEND_LIMIT);
+        return value >= 0 ? value : DEFAULT_IP_SEND_LIMIT;
+    }
+
+    /** {@code otp.ipSendWindow} in seconds; non-positive/invalid falls back to the default. */
+    public static int resolveIpSendWindow(RealmModel realm) {
+        int value = parseIntAttribute(realm, CONFIG_IP_SEND_WINDOW, DEFAULT_IP_SEND_WINDOW);
+        return value > 0 ? value : DEFAULT_IP_SEND_WINDOW;
+    }
+
+    private static int parseIntAttribute(RealmModel realm, String name, int defaultValue) {
+        String configured = realm.getAttribute(name);
+        if (configured == null || configured.isBlank()) {
+            return defaultValue;
+        }
+        try {
+            return Integer.parseInt(configured.trim());
+        } catch (NumberFormatException e) {
+            return defaultValue;
+        }
+    }
+
+    /** Seconds until the earliest slot expires (at least 1, at most the window). */
+    private static int ipRetryAfter(SingleUseObjectProvider store, String prefix, int limit, int windowSec) {
+        int now = Time.currentTime();
+        int earliest = windowSec;
+        for (int slot = 0; slot < limit; slot++) {
+            Map<String, String> meta = store.get(prefix + slot + ":meta");
+            if (meta == null || meta.get(NOTE_EXPIRES_AT) == null) {
+                continue;
+            }
+            try {
+                earliest = Math.min(earliest, Integer.parseInt(meta.get(NOTE_EXPIRES_AT)) - now);
+            } catch (NumberFormatException ignored) {
+                // treat as a full window
+            }
+        }
+        return Math.max(1, earliest);
+    }
+
+    /**
+     * Canonical bucket for a client address. IPv6 addresses are collapsed to their /64 prefix
+     * (a single subscriber usually controls a whole /64, so per-address buckets would be
+     * trivially bypassed); IPv4-mapped IPv6 addresses collapse to their IPv4 form. Returns
+     * {@code null} when no address is available.
+     */
+    static String normalizeIp(String clientIp) {
+        if (clientIp == null || clientIp.isBlank()) {
+            return null;
+        }
+        String ip = clientIp.trim();
+        if (ip.startsWith("[") && ip.endsWith("]")) {
+            ip = ip.substring(1, ip.length() - 1);
+        }
+        int zone = ip.indexOf('%');
+        if (zone >= 0) {
+            ip = ip.substring(0, zone);
+        }
+        // Only hand strings that are syntactically IPv6 literals to InetAddress, so it can
+        // never fall back to a DNS lookup.
+        if (ip.indexOf(':') >= 0 && IPV6_LITERAL.matcher(ip).matches()) {
+            try {
+                InetAddress addr = InetAddress.getByName(ip);
+                if (addr instanceof Inet6Address) {
+                    byte[] b = addr.getAddress();
+                    StringBuilder sb = new StringBuilder();
+                    for (int i = 0; i < 8; i += 2) {
+                        sb.append(Integer.toHexString(((b[i] & 0xff) << 8) | (b[i + 1] & 0xff))).append(':');
+                    }
+                    return sb.append(":/64").toString();
+                }
+                return addr.getHostAddress();
+            } catch (UnknownHostException e) {
+                // not a valid literal; fall through and bucket on the raw string
+            }
+        }
+        return ip.toLowerCase(Locale.ROOT);
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Per-(realm, submitted identifier, channel) throttle.
+    //
+    // Used by the public OTP grant types, where every phase-1 request must be throttled the
+    // same way whether or not the submitted username/email resolves to an account — otherwise
+    // the presence or absence of a 429 reveals that the account exists. The key is derived
+    // only from the normalized identifier string the client sent, never from a user id.
+    // ---------------------------------------------------------------------------------------
+
+    private static final String IDENTIFIER_KEY_PREFIX = KEY_PREFIX + "id:";
+
+    /**
+     * Attempt to reserve a send slot for the submitted {@code identifier} (username or email,
+     * as typed). Returns {@code true} if the caller may proceed, {@code false} if a previous
+     * request for the same normalized identifier is still within {@code cooldownSec}.
+     * The identifier is trimmed and lower-cased, matching Keycloak's case-insensitive
+     * username/email lookups, so case variations share one slot.
+     */
+    public static boolean tryReserveForIdentifier(KeycloakSession session, RealmModel realm, String identifier,
+                                                  String channel, int cooldownSec) {
+        if (cooldownSec <= 0) {
+            return true;
+        }
+        SingleUseObjectProvider store = session.getProvider(SingleUseObjectProvider.class);
+        String key = buildIdentifierKey(realm, identifier, channel);
+        if (!store.putIfAbsent(key, cooldownSec)) {
+            return false;
+        }
+        Map<String, String> notes = new HashMap<>();
+        notes.put(NOTE_EXPIRES_AT, String.valueOf(Time.currentTime() + cooldownSec));
+        store.put(key + ":meta", cooldownSec, notes);
+        return true;
+    }
+
+    /**
+     * Remaining cooldown seconds (clamped to 0) for the submitted {@code identifier}.
+     * Returns 0 if there is no active reservation.
+     */
+    public static int remainingSecondsForIdentifier(KeycloakSession session, RealmModel realm, String identifier,
+                                                    String channel) {
+        SingleUseObjectProvider store = session.getProvider(SingleUseObjectProvider.class);
+        Map<String, String> meta = store.get(buildIdentifierKey(realm, identifier, channel) + ":meta");
+        if (meta == null) {
+            return 0;
+        }
+        String expiresAtStr = meta.get(NOTE_EXPIRES_AT);
+        if (expiresAtStr == null) {
+            return 0;
+        }
+        try {
+            return Math.max(0, Integer.parseInt(expiresAtStr) - Time.currentTime());
+        } catch (NumberFormatException e) {
+            return 0;
+        }
+    }
+
+    /**
+     * Releases a reservation taken by {@link #tryReserveForIdentifier}, e.g. when OTP delivery
+     * failed and the caller should be allowed to retry immediately.
+     */
+    public static void releaseIdentifier(KeycloakSession session, RealmModel realm, String identifier,
+                                         String channel) {
+        SingleUseObjectProvider store = session.getProvider(SingleUseObjectProvider.class);
+        String key = buildIdentifierKey(realm, identifier, channel);
+        store.remove(key);
+        store.remove(key + ":meta");
+    }
+
+    /**
+     * {@code otp-throttle:id:<realmId>:<sha256(realmId, normalized identifier, channel)>}.
+     * Hashed so raw usernames / email addresses are not kept in cache keys, and prefixed
+     * distinctly from the per-user key so an identifier can never collide with a user id.
+     */
+    private static String buildIdentifierKey(RealmModel realm, String identifier, String channel) {
+        String normalized = identifier == null ? "" : identifier.trim().toLowerCase(java.util.Locale.ROOT);
+        String material = realm.getId() + "\n" + normalized + "\n" + channel;
+        try {
+            byte[] digest = java.security.MessageDigest.getInstance("SHA-256")
+                    .digest(material.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            return IDENTIFIER_KEY_PREFIX + realm.getId() + ":" + java.util.HexFormat.of().formatHex(digest);
+        } catch (java.security.NoSuchAlgorithmException e) {
+            // SHA-256 is mandatory in every JRE.
+            throw new IllegalStateException("SHA-256 not available", e);
+        }
     }
 }

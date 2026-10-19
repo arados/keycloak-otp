@@ -165,10 +165,19 @@ public class EmailOtpAuthenticator implements Authenticator {
         String hash = OtpHash.hash(code, salt);
         int codeExpiresAt = Time.currentTime() + ttl;
 
+        // Per-source-IP cap is checked first so a blocked IP never consumes the user's cooldown.
+        OtpSendThrottle.IpSlot ipSlot = OtpSendThrottle.tryReserveIpSlot(context.getSession(),
+                context.getRealm(), context.getConnection());
+        if (!ipSlot.isAllowed()) {
+            challengeIpLimited(context, ipSlot);
+            return;
+        }
+
         boolean reserved = OtpSendThrottle.tryReserveWithCodeHash(context.getSession(), context.getRealm(),
                 context.getUser(), OtpSendThrottle.CHANNEL_EMAIL, cooldown, hash, salt, codeExpiresAt);
 
         if (!reserved) {
+            OtpSendThrottle.releaseIpSlot(context.getSession(), ipSlot);
             // Throttled. Recover the most recently delivered code's hash/salt into this session
             // so a user who legitimately restarted their login within the cooldown can complete
             // it with what was sent to their inbox. If no stash is available (e.g. cooldown=0
@@ -201,6 +210,7 @@ public class EmailOtpAuthenticator implements Authenticator {
             // Delivery failed. Roll back the throttle reservation so the user is not locked
             // out by a cooldown protecting an OTP they never received, and clear the auth notes
             // we just wrote so this session does not later "recover" a code that was not sent.
+            OtpSendThrottle.releaseIpSlot(context.getSession(), ipSlot);
             OtpSendThrottle.release(context.getSession(), context.getRealm(), context.getUser(),
                     OtpSendThrottle.CHANNEL_EMAIL);
             authSession.removeAuthNote(EmailOtpConst.AUTH_NOTE_CODE_HASH);
@@ -223,8 +233,17 @@ public class EmailOtpAuthenticator implements Authenticator {
         String salt = OtpHash.newSalt();
         String hash = OtpHash.hash(newCode, salt);
         int codeExpiresAt = Time.currentTime() + ttl;
+        OtpSendThrottle.IpSlot ipSlot = OtpSendThrottle.tryReserveIpSlot(context.getSession(),
+                context.getRealm(), context.getConnection());
+        if (!ipSlot.isAllowed()) {
+            challengeIpLimited(context, ipSlot);
+            return;
+        }
         boolean reserved = OtpSendThrottle.tryReserveWithCodeHash(context.getSession(), context.getRealm(),
                 context.getUser(), OtpSendThrottle.CHANNEL_EMAIL, cooldown, hash, salt, codeExpiresAt);
+        if (!reserved) {
+            OtpSendThrottle.releaseIpSlot(context.getSession(), ipSlot);
+        }
         if (reserved) {
             AuthenticationSessionModel authSession = context.getAuthenticationSession();
             authSession.setAuthNote(EmailOtpConst.AUTH_NOTE_CODE_HASH, hash);
@@ -233,6 +252,7 @@ public class EmailOtpAuthenticator implements Authenticator {
             authSession.setAuthNote(EmailOtpConst.AUTH_NOTE_ATTEMPTS, "0");
             authSession.setAuthNote(EmailOtpConst.AUTH_NOTE_LAST_SENT, String.valueOf(Time.currentTime()));
             if (!sendEmail(context, newCode)) {
+                OtpSendThrottle.releaseIpSlot(context.getSession(), ipSlot);
                 OtpSendThrottle.release(context.getSession(), context.getRealm(), context.getUser(),
                         OtpSendThrottle.CHANNEL_EMAIL);
                 authSession.removeAuthNote(EmailOtpConst.AUTH_NOTE_CODE_HASH);
@@ -248,6 +268,15 @@ public class EmailOtpAuthenticator implements Authenticator {
                         .setAttribute("resendAvailableInSeconds", resendAvailableInSeconds(context))
                         .setError(EmailOtpConst.ERROR_OTP_EXPIRED)
                         .createForm(EmailOtpConst.LOGIN_TEMPLATE));
+    }
+
+    /** OTP form without sending: the per-source-IP send limit is exhausted. */
+    private void challengeIpLimited(AuthenticationFlowContext context, OtpSendThrottle.IpSlot ipSlot) {
+        context.challenge(context.form()
+                .setAttribute("resendAvailableInSeconds",
+                        Math.max(resendAvailableInSeconds(context), ipSlot.retryAfterSeconds()))
+                .setError(OtpSendThrottle.ERROR_IP_SEND_LIMITED)
+                .createForm(EmailOtpConst.LOGIN_TEMPLATE));
     }
 
     private void challengeOtpForm(AuthenticationFlowContext context) {

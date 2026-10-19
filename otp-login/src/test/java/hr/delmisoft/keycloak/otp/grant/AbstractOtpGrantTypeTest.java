@@ -47,6 +47,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.startsWith;
 import static org.mockito.Mockito.atLeast;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
@@ -79,6 +80,7 @@ class AbstractOtpGrantTypeTest {
     @Mock KeycloakContext keycloakContext;
 
     private TestableEmailOtpGrantType grant;
+    private OtpGrantTestSupport.AsyncDeliveryHarness async;
 
     @BeforeEach
     void setUp() {
@@ -108,7 +110,12 @@ class AbstractOtpGrantTypeTest {
         when(user.credentialManager()).thenReturn(credentialManager);
 
         when(userProvider.getUserByUsername(any(), any())).thenReturn(user);
+        when(userProvider.getUserById(any(), eq("user-1"))).thenReturn(user);
         when(singleUseStore.putIfAbsent(anyString(), anyLong())).thenReturn(true);
+
+        // OTP delivery runs asynchronously after the request; the delivery job uses the same
+        // session mock here so the channel providers stubbed above are reused.
+        async = OtpGrantTestSupport.AsyncDeliveryHarness.install(session, session, realm, "realm-1");
 
         // EventBuilder chains. event.error(String) is void in 26.8.1 so it's not stubbed —
         // lenient strictness lets the void call pass through silently.
@@ -158,7 +165,8 @@ class AbstractOtpGrantTypeTest {
 
     @Test
     void phase1_unknownUser_returnsIndistinguishableResponse() throws Exception {
-        // No actual OTP delivery, no throttle reservation — but the response shape mirrors success.
+        // No actual OTP delivery and no OTP session — but the response shape mirrors success,
+        // and the per-identifier send throttle is consumed exactly like for a real account.
         when(userProvider.getUserByUsername(any(), eq("ghost"))).thenReturn(null);
         inject(OtpGrantTestSupport.formParams(Map.of("username", "ghost")));
 
@@ -167,7 +175,9 @@ class AbstractOtpGrantTypeTest {
         assertThat(response.getStatus(), equalTo(401));
         Map<?, ?> body = (Map<?, ?>) response.getEntity();
         assertThat(body.get("otp_session_id"), notNullValue());
-        verify(singleUseStore, never()).putIfAbsent(anyString(), anyLong());
+        verify(singleUseStore).putIfAbsent(startsWith("otp-throttle:id:"), anyLong());
+        verify(singleUseStore, never()).put(eq((String) body.get("otp_session_id")), anyLong(), any());
+        async.completeRequest();
         verify(emailProvider, never()).send(anyString(), anyString(), any());
     }
 
@@ -194,8 +204,12 @@ class AbstractOtpGrantTypeTest {
         Response response = grant.process(OtpGrantTestSupport.dummyContext(session));
 
         assertThat(response.getStatus(), equalTo(401));
+        async.completeRequest();
         verify(emailProvider, never()).send(anyString(), anyString(), any());
-        verify(singleUseStore, never()).putIfAbsent(anyString(), anyLong());
+        // Only the per-identifier throttle slot is taken (same as for an unknown username) —
+        // no per-user cooldown, since nothing is sent.
+        verify(singleUseStore).putIfAbsent(startsWith("otp-throttle:id:"), anyLong());
+        verify(singleUseStore, never()).putIfAbsent(startsWith("otp-throttle:realm-1:"), anyLong());
     }
 
     @Test
@@ -218,46 +232,56 @@ class AbstractOtpGrantTypeTest {
     // ---------- Phase 1: brute-force interaction ----------
 
     @Test
-    void phase1_bruteForceLockedUser_isRejectedWithGenericError() throws Exception {
-        // A locked-out user must not learn whether their lockout is what blocked them —
-        // the response is the same generic "Invalid user credentials" the wrong-OTP path returns.
+    void phase1_bruteForceLockedUser_returnsIndistinguishableResponse() throws Exception {
+        // A locked-out account must look exactly like an unknown username: the fake phase-1
+        // response, and no OTP sent.
         when(realm.isBruteForceProtected()).thenReturn(true);
         when(bruteForceProtector.isTemporarilyDisabled(session, realm, user)).thenReturn(true);
         inject(OtpGrantTestSupport.formParams(Map.of("username", "alice")));
 
-        CorsErrorResponseException ex = assertThrowsCors(() -> grant.process(OtpGrantTestSupport.dummyContext(session)));
+        Response response = grant.process(OtpGrantTestSupport.dummyContext(session));
 
-        assertThat(errorOf(ex), equalTo(OAuthErrorException.INVALID_GRANT));
+        assertThat(response.getStatus(), equalTo(401));
+        Map<?, ?> body = (Map<?, ?>) response.getEntity();
+        assertThat(body.get("error"), equalTo("email_otp_required"));
+        assertThat(body.get("otp_session_id"), notNullValue());
         verify(emailProvider, never()).send(anyString(), anyString(), any());
     }
 
     // ---------- Phase 1: required actions ----------
 
     @Test
-    void phase1_userWithRequiredActions_isRejected() throws Exception {
+    void phase1_userWithRequiredActions_returnsIndistinguishableResponse() throws Exception {
+        // Pending required actions must not be revealed (that would confirm the account exists);
+        // no OTP is sent and token issuance stays impossible.
         when(user.getRequiredActionsStream()).thenReturn(Stream.of("UPDATE_PASSWORD"));
         inject(OtpGrantTestSupport.formParams(Map.of("username", "alice")));
 
-        CorsErrorResponseException ex = assertThrowsCors(() -> grant.process(OtpGrantTestSupport.dummyContext(session)));
+        Response response = grant.process(OtpGrantTestSupport.dummyContext(session));
 
-        assertThat(errorOf(ex), equalTo(OAuthErrorException.INVALID_GRANT));
-        assertThat(ex.getErrorDescription(), containsString("not fully set up"));
+        assertThat(response.getStatus(), equalTo(401));
+        Map<?, ?> body = (Map<?, ?>) response.getEntity();
+        assertThat(body.get("otp_session_id"), notNullValue());
         verify(emailProvider, never()).send(anyString(), anyString(), any());
     }
 
     // ---------- Phase 1: password validation when supplied ----------
 
     @Test
-    void phase1_wrongPasswordWhenSupplied_isRejectedAndRecordsBruteForceFailure() throws Exception {
+    void phase1_wrongPasswordWhenSupplied_returnsIndistinguishableResponseAndRecordsBruteForceFailure() throws Exception {
         when(realm.isBruteForceProtected()).thenReturn(true);
         when(credentialManager.isValid(any(UserCredentialModel.class))).thenReturn(false);
         inject(OtpGrantTestSupport.formParams(Map.of(
                 "username", "alice",
                 "password", "wrong")));
 
-        CorsErrorResponseException ex = assertThrowsCors(() -> grant.process(OtpGrantTestSupport.dummyContext(session)));
+        Response response = grant.process(OtpGrantTestSupport.dummyContext(session));
 
-        assertThat(errorOf(ex), equalTo(OAuthErrorException.INVALID_GRANT));
+        // Same shape as an unknown username, so phase 1 is not a password oracle.
+        assertThat(response.getStatus(), equalTo(401));
+        Map<?, ?> body = (Map<?, ?>) response.getEntity();
+        assertThat(body.get("error"), equalTo("email_otp_required"));
+        assertThat(body.get("otp_session_id"), notNullValue());
         verify(bruteForceProtector).failedLogin(eq(realm), eq(user), eq(clientConnection), any(), eq(Set.of("test-client")));
         verify(emailProvider, never()).send(anyString(), anyString(), any());
     }
@@ -276,15 +300,20 @@ class AbstractOtpGrantTypeTest {
         Map<?, ?> body = (Map<?, ?>) response.getEntity();
         String sessionId = (String) body.get("otp_session_id");
         assertThat(sessionId, notNullValue());
-        verify(emailProvider).send(anyString(), anyString(), any());
         verify(singleUseStore).put(eq(sessionId), anyLong(), notesCaptor.capture());
+        // Delivery happens after the request completes (see OtpGrantAsyncDeliveryTest).
+        verify(emailProvider, never()).send(anyString(), anyString(), any());
+        async.completeRequest();
+        verify(emailProvider).send(anyString(), anyString(), any());
 
         Map<String, String> notes = (Map<String, String>) notesCaptor.getValue();
         assertThat(notes.get("userId"), equalTo("user-1"));
         assertThat(notes.get("clientId"), equalTo("test-client"));
-        assertThat(notes.get("attempts"), equalTo("0"));
         assertThat(notes.get("codeHash"), notNullValue());
         assertThat(notes.get("codeSalt"), notNullValue());
+        assertThat(Integer.parseInt(notes.get("codeExpiresAt")), greaterThan(Time.currentTime()));
+        // Attempts are tracked per delivered code via atomic slots, not as a session counter.
+        assertThat(notes.containsKey("attempts"), equalTo(false));
     }
 
     // ---------- Phase 1: throttle ----------
@@ -317,13 +346,20 @@ class AbstractOtpGrantTypeTest {
                 .when(emailProvider).send(anyString(), anyString(), any());
         inject(OtpGrantTestSupport.formParams(Map.of("username", "alice")));
 
-        assertThrowsCors(() -> grant.process(OtpGrantTestSupport.dummyContext(session)));
+        // Delivery is asynchronous: the client gets the normal phase-1 response either way.
+        Response response = grant.process(OtpGrantTestSupport.dummyContext(session));
+        assertThat(response.getStatus(), equalTo(401));
+        String sessionId = (String) ((Map<?, ?>) response.getEntity()).get("otp_session_id");
+        verify(singleUseStore, never()).remove(anyString());
 
-        // Both the session id store entry AND the throttle reservation must be removed so a
-        // transient delivery error doesn't lock the user out of retries. release() removes
-        // two keys (the bare key + the ":meta" sibling), and the otp_session_id is also
-        // removed — three total remove() calls.
-        verify(singleUseStore, atLeast(2)).remove(anyString());
+        async.completeRequest();
+
+        // Both the session id store entry AND the throttle reservations must be removed so a
+        // transient delivery error doesn't lock the user out of retries.
+        verify(singleUseStore).remove(sessionId);
+        verify(singleUseStore).remove("otp-throttle:realm-1:user-1:email");
+        verify(singleUseStore).remove("otp-throttle:realm-1:user-1:email:meta");
+        verify(singleUseStore, atLeast(1)).remove(startsWith("otp-throttle:id:"));
     }
 
     // ---------- Phase 2: session-id validation ----------
@@ -348,16 +384,20 @@ class AbstractOtpGrantTypeTest {
                 "otp", "123456",
                 "otp_session_id", "session-x")));
 
-        CorsErrorResponseException ex = assertThrowsCors(() -> grant.process(OtpGrantTestSupport.dummyContext(session)));
+        Response response = grant.process(OtpGrantTestSupport.dummyContext(session));
 
-        assertThat(errorOf(ex), equalTo("emailOtpSessionExpired"));
+        assertThat(response.getStatus(), equalTo(401));
+        Map<?, ?> body = (Map<?, ?>) response.getEntity();
+        assertThat(body.get("error"), equalTo("emailOtpSessionExpired"));
     }
 
     // ---------- Phase 2: user binding ----------
 
     @Test
     void phase2_otpSessionBoundToDifferentUser_isRejected() throws Exception {
-        Map<String, String> notes = stubStoredSession("other-user-id", "test-client", "0", "123456");
+        // Rejected with the same generic "expired" response a fake session id gets, so a
+        // session for one account cannot be used to probe whether other usernames exist.
+        Map<String, String> notes = stubStoredSession("other-user-id", "test-client", "123456");
         when(singleUseStore.get("sess")).thenReturn(notes);
 
         inject(OtpGrantTestSupport.formParams(Map.of(
@@ -365,9 +405,11 @@ class AbstractOtpGrantTypeTest {
                 "otp", "123456",
                 "otp_session_id", "sess")));
 
-        CorsErrorResponseException ex = assertThrowsCors(() -> grant.process(OtpGrantTestSupport.dummyContext(session)));
+        Response response = grant.process(OtpGrantTestSupport.dummyContext(session));
 
-        assertThat(errorOf(ex), equalTo(OAuthErrorException.INVALID_GRANT));
+        assertThat(response.getStatus(), equalTo(401));
+        Map<?, ?> body = (Map<?, ?>) response.getEntity();
+        assertThat(body.get("error"), equalTo("emailOtpSessionExpired"));
         verify(singleUseStore).remove("sess");
     }
 
@@ -377,7 +419,7 @@ class AbstractOtpGrantTypeTest {
     void phase2_otpSessionBoundToDifferentClient_isRejected() throws Exception {
         // SECURITY: prevents a malicious client from redeeming an OTP session that was
         // initiated against a different client.
-        Map<String, String> notes = stubStoredSession("user-1", "other-client", "0", "123456");
+        Map<String, String> notes = stubStoredSession("user-1", "other-client", "123456");
         when(singleUseStore.get("sess")).thenReturn(notes);
 
         inject(OtpGrantTestSupport.formParams(Map.of(
@@ -394,10 +436,9 @@ class AbstractOtpGrantTypeTest {
     // ---------- Phase 2: brute-force counter ----------
 
     @Test
-    @SuppressWarnings({"unchecked", "rawtypes"})
-    void phase2_invalidOtp_incrementsAttemptsAndRecordsBruteForce() throws Exception {
+    void phase2_invalidOtp_consumesAttemptSlotAndRecordsBruteForce() throws Exception {
         when(realm.isBruteForceProtected()).thenReturn(true);
-        Map<String, String> notes = stubStoredSession("user-1", "test-client", "0", "123456");
+        Map<String, String> notes = stubStoredSession("user-1", "test-client", "123456");
         when(singleUseStore.get("sess")).thenReturn(notes);
 
         inject(OtpGrantTestSupport.formParams(Map.of(
@@ -409,17 +450,21 @@ class AbstractOtpGrantTypeTest {
 
         assertThat(errorOf(ex), equalTo("emailOtpInvalid"));
         verify(bruteForceProtector).failedLogin(eq(realm), eq(user), any(), any(), eq(Set.of("test-client")));
-        // attempts counter bumped from 0 to 1
-        ArgumentCaptor<Map> capt = ArgumentCaptor.forClass(Map.class);
-        verify(singleUseStore).replace(eq("sess"), capt.capture());
-        Map<String, String> updated = (Map<String, String>) capt.getValue();
-        assertThat(updated.get("attempts"), equalTo("1"));
+        // The attempt is reserved atomically against the delivered code (shared with the
+        // browser flow) — there is no read-modify-write counter on the OTP session any more.
+        verify(singleUseStore).putIfAbsent(
+                eq("otp-throttle:realm-1:user-1:email:attempt:" + notes.get("codeHash") + ":0"), anyLong());
+        verify(singleUseStore, never()).replace(anyString(), any());
+        verify(singleUseStore, never()).remove("sess");
     }
 
     @Test
     void phase2_maxRetriesExceeded_isRejected() throws Exception {
-        Map<String, String> notes = stubStoredSession("user-1", "test-client", "3", "123456");
+        Map<String, String> notes = stubStoredSession("user-1", "test-client", "123456");
         when(singleUseStore.get("sess")).thenReturn(notes);
+        // Every attempt slot for this code is already taken.
+        when(singleUseStore.putIfAbsent(startsWith("otp-throttle:realm-1:user-1:email:attempt:"), anyLong()))
+                .thenReturn(false);
 
         inject(OtpGrantTestSupport.formParams(Map.of(
                 "username", "alice",
@@ -433,10 +478,10 @@ class AbstractOtpGrantTypeTest {
     }
 
     @Test
-    void phase2_malformedAttemptsCounter_failsClosed() throws Exception {
-        // A corrupt counter must not let an attacker pass an unbounded-retries check by
-        // tampering with the stored session.
-        Map<String, String> notes = stubStoredSession("user-1", "test-client", "not-a-number", "123456");
+    void phase2_malformedCodeExpiry_failsClosed() throws Exception {
+        // A corrupt session must never be treated as having an unbounded attempt window.
+        Map<String, String> notes = stubStoredSession("user-1", "test-client", "123456");
+        notes.put("codeExpiresAt", "not-a-number");
         when(singleUseStore.get("sess")).thenReturn(notes);
 
         inject(OtpGrantTestSupport.formParams(Map.of(
@@ -452,15 +497,15 @@ class AbstractOtpGrantTypeTest {
 
     // ---------- Helpers ----------
 
-    private Map<String, String> stubStoredSession(String userId, String clientId, String attempts, String code) {
+    private Map<String, String> stubStoredSession(String userId, String clientId, String code) {
         String salt = OtpHash.newSalt();
         String hash = OtpHash.hash(code, salt);
         Map<String, String> notes = new HashMap<>();
         notes.put("userId", userId);
         notes.put("clientId", clientId);
-        notes.put("attempts", attempts);
         notes.put("codeHash", hash);
         notes.put("codeSalt", salt);
+        notes.put("codeExpiresAt", String.valueOf(Time.currentTime() + 300));
         return notes;
     }
 

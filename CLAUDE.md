@@ -73,6 +73,7 @@ themes (no Java dependencies)
   - Optional password validation (MFA when password present, passwordless when absent)
   - Registered via `META-INF/services/org.keycloak.protocol.oidc.grants.OAuth2GrantTypeFactory`
 - Uses `SingleUseObjectProvider` for stateless token-based OTP sessions
+- Phase-1 delivery is **asynchronous**: the request stores the OTP session and enlists an after-completion hook (`session.getTransactionManager().enlistAfterCompletion`); after the request transaction commits, the hook submits the send to `ExecutorsProvider.getExecutor("otp-delivery")`, which runs it via `KeycloakModelUtils.runJobInTransaction` in a fresh session, re-resolving realm/user by id. `sendOtp(KeycloakSession, RealmModel, UserModel, code)` must use only its arguments, never the grant's request-scoped fields. Async failure (or a rolled-back request) is logged and rolled back: OTP session removed, per-user / identifier / IP slots released. Phase 1 never returns `500 otp_send_failed` any more; the client sees `*OtpSessionExpired` in phase 2 and may retry phase 1 immediately
 
 **themes** — pure resources, no Java code:
 - `theme/otp/login/` — login form templates (`login-email-otp.ftl`, `login-sms-otp.ftl`, `login-otp-channel-select.ftl`) + messages
@@ -89,8 +90,17 @@ themes (no Java dependencies)
 - Browser `authenticate()` is idempotent: refreshing the OTP page rehydrates the existing valid code instead of triggering a new send
 - **Send rate limiting** — `OtpSendThrottle` keyed by `(realmId, userId, channel)`:
   - Browser flow: initial send for a fresh auth session always goes through; explicit **Resend** button and expired-code resends are gated by `sendCooldown` (default 60s)
-  - Grant types (`urn:otp:email`/`urn:otp:sms`): every phase-1 send is gated. Throttled requests return **HTTP 429** with `Retry-After` header and JSON body `{error:"otp_send_throttled", retry_after:N}`. Cooldown read from realm attribute `otp.sendCooldown` (default 60s).
+  - Grant types (`urn:otp:email`/`urn:otp:sms`): every phase-1 request is gated by a **per-(realm, submitted identifier, channel)** slot (`OtpSendThrottle.tryReserveForIdentifier`, key = SHA-256 of the trimmed, lower-cased username/email) *before* the user is looked up, so unknown usernames are throttled exactly like real ones. Throttled requests return **HTTP 429** with `Retry-After` header and JSON body `{error:"otp_send_throttled", retry_after:N}`. The per-user slot still caps real sends; when only it blocks (e.g. same account via email after username) the grant returns the normal fake phase-1 401 instead of 429. Cooldown read from realm attribute `otp.sendCooldown` (default 60s).
+- **Per-source-IP send limit**: `OtpSendThrottle.tryReserveIpSlot` / `releaseIpSlot`, keyed by `(realmId, client IP)` across all users and both channels (anti SMS-pumping / bombing):
+  - Realm attributes `otp.ipSendLimit` (default 10, `0` disables) and `otp.ipSendWindow` (default 3600s)
+  - Cluster-safe: one of N numbered slot keys `otp-ip:{realm}:{ip}:{slot}` is reserved with `putIfAbsent` and the window as TTL (no read-modify-write counter)
+  - IP from `ClientConnection.getRemoteAddr()` (honors Keycloak proxy config); IPv6 grouped by /64; missing IP is not tracked
+  - Checked **before** the identifier/per-user cooldowns. Browser: slot released when the per-user cooldown blocks or delivery fails. Grant types: slot released when the identifier throttle blocks (429) or delivery fails; kept when only the per-user cooldown blocks, so that case matches the fake path
+  - Grant types: same 429 shape as the cooldown. Unknown/disabled/unverified usernames also consume a slot (no enumeration oracle)
+  - Browser: OTP form rendered without sending, error message key `otpSendIpLimited`
+- **Grant-type account-enumeration resistance** (`AbstractOtpGrantType`): unknown / disabled / unverified / brute-force-locked / required-actions users and wrong `password` all get the indistinguishable phase-1 response (401 `*_otp_required` + random never-stored `otp_session_id`, no send; wrong password still records a brute-force failure). Every phase-2 failure that could depend on the account (ineligible user, wrong password, unknown/expired session, session bound to another user) returns the same 401 `*OtpSessionExpired` "OTP session has expired" response and consumes the submitted session id. Code generation/hashing, a dummy password hash and throwaway 1s cache writes (`otp-decoy:*`, same count as a real send) run on the fake path; delivery is asynchronous, so SMTP/SMS latency never reaches the response time. Residual: the account lookup itself and a few cache operations. `OtpGrantEnumerationParityTest` asserts real-vs-unknown parity — keep it passing when touching the grant flow.
 - **Per-code attempt limit (browser flow)** — `maxRetries` is enforced per *delivered code*, not per auth session. Before verifying, authenticators call `OtpSendThrottle.tryConsumeAttempt(...)`, which atomically reserves one of `maxRetries` numbered slot keys (`otp-throttle:{realm}:{user}:{channel}:attempt:{codeHash}:{n}`, via `putIfAbsent`, TTL = code expiry) shared by all sessions. When a code runs out of attempts, `OtpSendThrottle.burnCode(...)` drops it from the recoverable stash so `getRecentCode` returns null. Resend / channel re-select / a restarted login within the cooldown therefore never restores guesses; a new code is only sent once the cooldown allows. A legitimate restart within the cooldown still recovers an un-burned code (with its remaining attempts).
+- **Per-code attempt limit (grant types)** — phase 2 uses the same `tryConsumeAttempt` slots (keyed on the code hash, `DEFAULT_MAX_RETRIES` = 3, TTL = `codeExpiresAt` session note) *before* verifying, so concurrent guesses against one `otp_session_id` can never evaluate more than 3 wrong codes, and grant and browser guesses on a grant-sent code share one budget (the effective total is the larger of the two configured limits). The last wrong guess burns the stash; the next request finds no slot, removes the OTP session and gets `*OtpMaxRetries`. A correct code is redeemed only if `store.remove(otp_session_id)` returns the entry (one token per session under concurrency) and then burned so the browser flow cannot recover it.
 
 ### Testing
 
@@ -114,6 +124,8 @@ The `e2e` Maven module (activated by the `-P e2e` profile) is wired into the sta
 
 > The demo realm sets `sendCooldown=5s` (and `otp.sendCooldown=5s` for grant types). Long enough that slow CI render delay can't burn through the cooldown before the OTP form is rendered (the disabled-resend-button assertion was flaking at 2s), short enough that the resend E2E tests still exercise the throttled-then-allowed transitions without long waits.
 
+> The whole E2E suite sends every OTP from a single client IP, so the demo realm sets `otp.ipSendLimit=1000` / `otp.ipSendWindow=60` — high enough that the suite never trips the per-IP limit, while still exercising the slot-reservation path against real Keycloak. `otp-ip-limit.spec.js` temporarily lowers the limit via the admin API to assert the 429, then restores the original realm attributes.
+
 E2E tests extract SMS OTP codes from Docker logs (`LogSmsSenderFactory` output) and email OTP codes from Mailpit API.
 
 ## CI Pipeline
@@ -128,3 +140,20 @@ Security plugins configured in parent `pom.xml` (`pluginManagement`):
 - `dependency-check-maven` — run via `mvn dependency-check:aggregate`
 - SpotBugs exclusion filter: `spotbugs-exclude.xml`
 - Suppressions file: `dependency-check-suppressions.xml`
+
+## Versioning & Releases
+
+Versions are `MAJOR.MINOR.PATCH`, but the parts are **not** used the SemVer way. Bump by what the release contains:
+
+- **MAJOR** — new features (new authenticator, grant type, channel, config option, or other new capability)
+- **MINOR** — Keycloak library update (`keycloak.version` / base image bump)
+- **PATCH** — bug fixes and security fixes, including new settings added only to close a security issue
+
+If a release contains several kinds of change, the highest part wins; lower parts reset to 0 (e.g. 1.3.1 + feature → 2.0.0, 1.3.1 + Keycloak bump → 1.4.0).
+
+Release procedure:
+1. On a branch, set the version in every module: `mvn -P e2e versions:set -DnewVersion=X.Y.Z -DgenerateBackupPoms=false -DprocessAllModules=true`, commit as `Release X.Y.Z`, and open a PR to `main`.
+2. After it is merged, wait for the `main` CI run (it is the only run that includes dependency-check) to pass.
+3. Tag the merge commit with an annotated tag (`git tag -a vX.Y.Z -m "Release X.Y.Z"`) and push it; the `release` job builds the JAR and publishes the GitHub Release.
+
+CI only runs for PRs that target `main`, so avoid stacked PRs: a PR whose base is another feature branch gets no CI, and merging it in GitHub lands it in that branch rather than `main`. Combine dependent changes into one PR or merge them sequentially.
